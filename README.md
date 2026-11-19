@@ -20,7 +20,7 @@ terrain from the seed, and pulls models/textures out of the server's game files.
 | Website (three.js) | `web/` |
 
 Nothing extracted from the game is committed: `data/` and `web/assets/` are generated locally
-(see `.gitignore`). The site contains Iron Gate's art, so the public deployment is password-protected.
+(see `.gitignore`).
 
 ## Running it
 
@@ -36,7 +36,7 @@ Name places or change their size in `regions.json`.
 
 On the game server (`deploy/`):
 
-- `valheimdisplay.caddy` → `/etc/caddy/sites/` serves https://valheim.benjaminsanborn.com (and valheim.goku.host) behind a shared
-  password (`caddy hash-password`), from `/var/www/valheimdisplay`.
+- `valheimdisplay.caddy` → `/etc/caddy/sites/` serves https://valheim.benjaminsanborn.com (and valheim.goku.host)
+  from `/var/www/valheimdisplay`.
 - `valheimdisplay-update.{service,timer}` → `~/.config/systemd/user/` rebuilds every night at 04:30
   (`systemctl --user list-timers`, logs: `journalctl --user -u valheimdisplay-update`).
