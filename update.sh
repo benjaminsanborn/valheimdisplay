@@ -21,7 +21,8 @@ if [ -n "$SSH_HOST" ]; then
 else
   rsync -a --delete "$WORLD_DIR/" data/world/
 fi
-uv run --frozen python tools/build.py "$@"
+UV=$(command -v uv || echo "$HOME/.local/bin/uv")
+"$UV" run --frozen python tools/build.py "$@"
 if [ -n "$VALHEIM_PUBLISH" ]; then
   rsync -a --delete web/ "$VALHEIM_PUBLISH/"
 fi
