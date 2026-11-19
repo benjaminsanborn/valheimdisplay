@@ -1,0 +1,11 @@
+[
+  {"slug": "main",      "title": "Main base",            "x": 705,  "z": -113,  "radius": 150},
+  {"slug": "woods",     "title": "Woods base",           "x": 6,    "z": -228,  "radius": 110},
+  {"slug": "farm",      "title": "Farm",                 "x": 3000, "z": -3974, "radius": 110},
+  {"slug": "iron",      "title": "Iron base (swamp)",    "x": 4790, "z": -2450, "radius": 160},
+  {"slug": "elder",     "title": "Elder outpost",        "x": 2910, "z": -2895, "radius": 100},
+  {"slug": "north",     "title": "North base",           "x": 1477, "z": 4719,  "radius": 100},
+  {"slug": "bonemass",  "title": "Bonemass camp",        "x": 4440, "z": 3165,  "radius": 100},
+  {"slug": "mushroom",  "title": "Mushroom mountain",    "x": 1592, "z": -976,  "radius": 80},
+  {"slug": "eryk",      "title": "Eryk's hut",           "x": -524, "z": -398,  "radius": 60}
+]

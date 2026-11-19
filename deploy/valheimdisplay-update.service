@@ -1,0 +1,15 @@
+[Unit]
+Description=Rebuild the Valheim world viewer from the latest save
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/valheimdisplay
+Environment=VALHEIM_SSH=
+Environment=VALHEIM_GAME_DATA=%h/valheim/valheim_server_Data
+Environment=VALHEIM_PUBLISH=/var/www/valheimdisplay
+# pull code changes, then rebuild; run gently next to the game server
+ExecStart=/usr/bin/git pull --ff-only
+ExecStart=%h/.local/bin/uv sync --frozen
+ExecStart=%h/valheimdisplay/update.sh
+Nice=15
+IOSchedulingClass=idle

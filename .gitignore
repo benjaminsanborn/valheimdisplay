@@ -1,0 +1,5 @@
+# game files and anything extracted from them stay local (Iron Gate's assets)
+data/
+web/assets/
+.venv/
+__pycache__/

@@ -1,0 +1,75 @@
+"""Rebuild the viewer data: places (tools/places.py), terrain, models, world map, portal links.
+
+usage: build.py [--models-only] [slug ...]
+"""
+import json, os, subprocess, sys
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.chdir(ROOT)
+sys.path.insert(0, 'tools')
+import vworld
+
+from places import build_places
+py = [sys.executable]
+GAME = os.environ.get('VALHEIM_GAME_DATA', 'data/game/gamedata')  # the server's valheim_server_Data folder
+os.makedirs('web/assets/regions', exist_ok=True)
+# prefab hash -> name table, regenerated when the game updates
+names_json = 'data/prefab_names.json'
+newest_game_file = max(os.path.getmtime(os.path.join(dp, f)) for dp, _, fs in os.walk(GAME) for f in fs)
+if not os.path.exists(names_json) or os.path.getmtime(names_json) < newest_game_file:
+    print('indexing prefab names...', flush=True)
+    subprocess.run(py + ['tools/prefab_names.py', GAME, names_json], check=True)
+regions = build_places()   # which places to render: see tools/places.py for the rule
+json.dump(regions, open('data/places.json', 'w'), indent=1)
+only = [a for a in sys.argv[1:] if not a.startswith('--')]
+if '--models-only' not in sys.argv:
+    for r in regions:
+        if only and r['slug'] not in only:
+            continue
+        subprocess.run(py + ['tools/export_region.py', 'data/world', 'web/assets', r['slug'], r['title'],
+                             str(r['x']), str(r['z']), str(r.get('radius', 120))], check=True)
+if not os.path.exists('web/assets/terrain/layer0.jpg'):
+    subprocess.run(py + ['tools/export_terrain_textures.py', GAME, 'web/assets/terrain'], check=True)
+manifest = json.load(open('web/assets/models.json')) if os.path.exists('web/assets/models.json') else {}
+need = [n for n in open('web/assets/needed_models.txt').read().split() if n not in manifest]
+skip = set(open('data/no_model.txt').read().split()) if os.path.exists('data/no_model.txt') else set()
+need = [n for n in need if n not in skip]
+if need:
+    open('data/todo_models.txt', 'w').write('\n'.join(need))
+    print(f'exporting {len(need)} models...', flush=True)
+    subprocess.run(py + ['tools/export_models.py', GAME, 'web/assets', '--list', 'data/todo_models.txt'], check=True)
+    manifest = json.load(open('web/assets/models.json'))
+    open('data/no_model.txt', 'a').write(''.join(n + '\n' for n in need if n not in manifest))
+subprocess.run(py + ['tools/export_worldmap.py', 'data/world', 'web/assets/worldmap.png', '1024'], check=True)
+
+# link portals: each portal label gets the place + spot its partner (same tag) is in
+portals = []
+for r in regions:
+    path = f"web/assets/regions/{r['slug']}.json"
+    if not os.path.exists(path):
+        continue
+    info = json.load(open(path))
+    for L in info['labels']:
+        if L['kind'].startswith('portal'):
+            portals.append((r, L))
+for r, L in portals:
+    partners = [(r2, L2) for r2, L2 in portals if L2['text'] == L['text'] and L2 is not L]
+    L['target'] = None
+    if partners:
+        r2, L2 = partners[0]
+        L['target'] = dict(slug=r2['slug'], title=r2['title'], pos=L2['pos'])
+for r in regions:
+    path = f"web/assets/regions/{r['slug']}.json"
+    if not os.path.exists(path):
+        continue
+    info = json.load(open(path))
+    mine = {tuple(L['world']): L for rr, L in portals if rr is r}
+    for L in info['labels']:
+        if 'world' in L and tuple(L['world']) in mine:
+            L['target'] = mine[tuple(L['world'])]['target']
+    json.dump(info, open(path, 'w'), separators=(',', ':'))
+
+meta = vworld.read_meta('data/world')
+idx = dict(world=meta.name, seed=meta.seed_name,
+           radius=10500, regions=[dict(slug=r['slug'], title=r['title'], x=r['x'], z=r['z']) for r in regions if os.path.exists(f"web/assets/regions/{r['slug']}.json")])
+json.dump(idx, open('web/assets/regions/index.json', 'w'), indent=1)
+print('regions:', [r['slug'] for r in idx['regions']])
