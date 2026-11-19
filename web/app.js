@@ -362,9 +362,25 @@ function builtFootprint(info, T) {
   return mask;
 }
 
+function buildDistance(info) {
+  // distance (m) from each 8 m cell to the nearest built piece, for thinning grass away from bases
+  const { w, d, x0, z0 } = info.grid, C = 8;
+  const cw = Math.ceil(w / C), cd = Math.ceil(d / C);
+  const built = info.objects.filter((o) => o[11] === 1);
+  const dist = new Float32Array(cw * cd).fill(1e9);
+  for (let cj = 0; cj < cd; cj++) for (let ci = 0; ci < cw; ci++) {
+    const x = x0 + ci * C + C / 2, z = -(z0 + cj * C + C / 2);
+    let best = 1e9;
+    for (const o of built) { const dd = (o[1] - x) ** 2 + (o[3] - z) ** 2; if (dd < best) best = dd; }
+    dist[cj * cw + ci] = Math.sqrt(best);
+  }
+  return (i, j) => dist[Math.floor(j / C) * cw + Math.floor(i / C)];
+}
+
 function buildGrass(info, T) {
   const { w, d, x0, z0 } = info.grid;
   const blocked = builtFootprint(info, T);
+  const distTo = buildDistance(info);
   let seed = 12345;
   const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
   const items = [];
@@ -381,6 +397,7 @@ function buildGrass(info, T) {
       }
       const wsum = (T.weights[k * 12] + T.weights[k * 12 + 1] + T.weights[k * 12 + 2] + T.weights[k * 12 + 3]) / 255;
       if (wsum < 0.05) continue;
+      dens *= Math.max(0.2, Math.min(1, 1 - (distTo(i, j) - 50) / 120));
       const count = Math.floor(dens + rnd());
       const vv = T.variation[k] / 255;
       for (let c = 0; c < count; c++) {

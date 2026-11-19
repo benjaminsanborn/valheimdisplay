@@ -73,3 +73,12 @@ idx = dict(world=meta.name, seed=meta.seed_name,
            radius=10500, regions=[dict(slug=r['slug'], title=r['title'], x=r['x'], z=r['z']) for r in regions if os.path.exists(f"web/assets/regions/{r['slug']}.json")])
 json.dump(idx, open('web/assets/regions/index.json', 'w'), indent=1)
 print('regions:', [r['slug'] for r in idx['regions']])
+
+# gzip the big data files once at build time; the web server sends these .gz copies
+import gzip, glob
+for f in glob.glob('web/assets/**/*', recursive=True):
+    if f.endswith(('.bin', '.json', '.glb')) and os.path.isfile(f):
+        gz = f + '.gz'
+        if not os.path.exists(gz) or os.path.getmtime(gz) < os.path.getmtime(f):
+            with open(f, 'rb') as src, gzip.open(gz, 'wb', compresslevel=9) as dst:
+                dst.write(src.read())

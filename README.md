@@ -36,7 +36,7 @@ Name places or change their size in `regions.json`.
 
 On the game server (`deploy/`):
 
-- `valheimdisplay.caddy` → `/etc/caddy/sites/` serves https://valheim.benjaminsanborn.com (and valheim.goku.host)
+- `valheimdisplay.caddy` → `/etc/caddy/sites/` serves https://valheim.goku.host
   from `/var/www/valheimdisplay`.
 - `valheimdisplay-update.{service,timer}` → `~/.config/systemd/user/` rebuilds every night at 04:30
   (`systemctl --user list-timers`, logs: `journalctl --user -u valheimdisplay-update`).

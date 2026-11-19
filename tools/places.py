@@ -5,7 +5,8 @@ Rule:
   2. A cluster becomes a place if it has at least MIN_PIECES pieces, or it contains a portal
      (so every portal has somewhere to lead to).
   3. Clusters whose centres are within MERGE m are shown as one place.
-  4. Size: the cluster's extent plus a margin, clamped to [MIN_R, MAX_R].
+  4. Size: the cluster's extent plus a margin, clamped to [MIN_R, MAX_R], then widened by AREA_SCALE
+     to show the surroundings (a radius in regions.json is scaled the same way).
   5. Name: an entry in regions.json near the place wins; otherwise the portal tag used to
      reach it, else the text of a sign there, else "Outpost <n>".
 
@@ -19,6 +20,7 @@ import vworld
 from vworld import stable_hash
 
 LINK, MIN_PIECES, MERGE, MIN_R, MAX_R, MARGIN = 40.0, 15, 150.0, 60.0, 160.0, 45.0
+AREA_SCALE = 1.5
 
 
 def build_places(world='data/world', names_path='data/prefab_names.json', overrides_path='regions.json'):
@@ -104,6 +106,7 @@ def build_places(world='data/world', names_path='data/prefab_names.json', overri
                 title = signs[0]
             if title:
                 title = title.strip()[:40]
+        radius *= AREA_SCALE
         places.append(dict(slug=slug, title=title, x=round(cx), z=round(cz), radius=round(radius),
                            pieces=len(idx), portals=len(portals)))
     n = 0
