@@ -1,7 +1,7 @@
 # Valheim world viewer -> /etc/caddy/sites/valheimdisplay.caddy (imported by /etc/caddy/Caddyfile)
 # HTTPS certificate is automatic. The site holds art extracted from the game, so it sits behind a
 # shared password: replace HASH with the output of `caddy hash-password` when installing.
-valheim.goku.host {
+valheim.benjaminsanborn.com, valheim.goku.host {
 	basic_auth {
 		friends HASH
 	}
