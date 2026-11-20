@@ -119,7 +119,9 @@ def main():
 
     print('reading world...', file=sys.stderr)
     xmin, xmax, zmin, zmax = ox, ox + (W - 1), oz, oz + (D - 1)
-    zdos = [z for z in vworld.read_zdos(world) if xmin <= z.pos[0] <= xmax and zmin <= z.pos[2] <= zmax]
+    # Dungeon and building interiors live ~5000 m up, above their entrances: leave them out.
+    zdos = [z for z in vworld.read_zdos(world)
+            if xmin <= z.pos[0] <= xmax and zmin <= z.pos[2] <= zmax and z.pos[1] < 1000]
 
     wg = terrain.WorldGen(meta.seed, meta.worldgen_version, rivers=False)
     hgt = np.zeros((D, W))
@@ -167,6 +169,9 @@ def main():
         gi = np.clip(np.round(sx).astype(int), 0, W - 1)
         gj = np.clip(np.round(sz).astype(int), 0, D - 1)
         resid = sy - hgt[gj, gi]
+        # drop outliers (things on shelves, floating debris) instead of letting them pull the ground around
+        ok = np.abs(resid) < 25
+        sx, sz, sy, resid = sx[ok], sz[ok], sy[ok], resid[ok]
         tree = cKDTree(np.stack([sx, sz], 1))
         gz, gx = np.mgrid[0:D, 0:W]
         pts = np.stack([gx.ravel(), gz.ravel()], 1).astype(float)
@@ -176,13 +181,15 @@ def main():
         w = np.where(valid, np.exp(-(np.where(valid, dist, 0) ** 2) / (2 * sigma * sigma)), 0.0)
         r = np.where(valid, resid[np.minimum(idx, len(resid) - 1)], 0.0)
         # median-ish robustness: clip extreme residuals from objects not on the ground
-        r = np.clip(r, -30, 30)
         num = (w * r).sum(1)
         den = w.sum(1)
         corr = (num / (den + 0.05)).reshape(D, W)
         big = np.abs(corr) > 0.3
         corrected = int(big.sum())
         hgt = hgt + np.where(big, corr, 0.0)
+        if os.environ.get('VIEWER_DEBUG'):
+            np.savez(os.path.join(out, 'regions', f'{slug}.debug.npz'), base=base, corr=np.where(big, corr, 0.0),
+                     edited=hgt - np.where(big, corr, 0.0), sx=sx, sz=sz, resid=resid, ox=ox, oz=oz)
 
     # texture blend weights per vertex (layers match export_terrain_textures.py)
     from scipy.ndimage import gaussian_filter
@@ -220,12 +227,39 @@ def main():
         overlay(9, paint[..., 2] * m)                    # paved
     wts /= np.maximum(wts.sum(-1, keepdims=True), 1e-6)
     variation = (terrain.perlin(wxs * 0.05, wzs * 0.05) * 0.6 + terrain.perlin(wxs * 0.2 + 3, wzs * 0.2) * 0.4)
-    # objects
+    # objects. Built pieces carry [first, last] indexes into `dates` (timelapse, tools/history.py);
+    # pieces that were torn down since are added back from the history so earlier days look right.
+    hist = json.load(open('data/history/built.json')) if os.path.exists('data/history/built.json') else {'dates': [], 'pieces': {}}
+    dates = sorted(set(hist['dates']))
+    di = {d: i for i, d in enumerate(dates)}
+    last_i = max(len(dates) - 1, 0)
+    from history import piece_key
+
+    class Gone:  # a torn-down piece, shaped like a ZDO for the loop below
+        def __init__(self, p):
+            self.prefab = stable_hash(p['name'])
+            self.pos, self.rot = p['pos'], p['rot']
+            self.longs = {H_CREATOR: 0}
+            self.vec3s = {H_SCALE: p['scale']} if p['scale'] else {}
+            self.floats, self.strings = {}, {}
+
+    present = set()
+    gone = []
+    for z in zdos:
+        if H_CREATOR in z.longs and names.get(z.prefab):
+            present.add(piece_key(names[z.prefab], z.pos))
+    for k, p in hist['pieces'].items():
+        x, y, zz = p['pos']
+        if k not in present and xmin <= x <= xmax and zmin <= zz <= zmax:
+            g = Gone(p)
+            names.setdefault(g.prefab, p['name'])
+            gone.append(g)
+
     objects = []
     labels = []
     model_index = {}
     built = 0
-    for z in zdos:
+    for z in list(zdos) + gone:
         name = names.get(z.prefab)
         if not name or name in SKIP_EXACT or any(s in name for s in SKIP_SUBSTR):
             continue
@@ -243,8 +277,13 @@ def main():
         objects.append([model_index[name], round(x - cx, 3), round(y, 3), round(-(zz - cz), 3),
                         round(q[0], 5), round(q[1], 5), round(q[2], 5), round(q[3], 5),
                         round(sc[0], 3), round(sc[1], 3), round(sc[2], 3), 1 if is_built else 0])
+        if is_built:
+            h = hist['pieces'].get(piece_key(name, z.pos))
+            first = di.get(h['first'], last_i) if h else last_i
+            last = di.get(h['last'], last_i) if h else last_i
+            objects[-1] += [first, last]
         text = z.strings.get(H_TEXT) or z.strings.get(H_TAG)
-        if text and is_built:
+        if text and is_built and not isinstance(z, Gone):
             labels.append(dict(text=text[:60], kind=name, pos=[round(x - cx, 2), round(y, 2), round(-(zz - cz), 2)],
                                world=[round(x, 2), round(zz, 2)]))
 
@@ -262,8 +301,9 @@ def main():
         terrain_format=2,
         models=list(model_index.keys()),
         objects=objects,
+        dates=dates,
         labels=labels,
-        stats=dict(objects=len(objects), built=built, models=len(model_index), corrected_vertices=corrected,
+        stats=dict(objects=len(objects), built=built - len(gone), torn_down=len(gone), models=len(model_index), corrected_vertices=corrected,
                    edited_zones=len(tcs)),
     )
     json.dump(info, open(os.path.join(out, 'regions', f'{slug}.json'), 'w'), separators=(',', ':'))

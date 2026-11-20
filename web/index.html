@@ -29,7 +29,21 @@
     transition: width .3s ease, height .3s ease; }
   body.big .disc { cursor: zoom-out; }
   #layer { position: absolute; }
-  #layer img { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: auto; user-select: none; -webkit-user-drag: none; }
+  #layer img, #layer canvas.fog { position: absolute; inset: 0; width: 100%; height: 100%; user-select: none; -webkit-user-drag: none; }
+  .mk.future i { background: #6b6458; box-shadow: 0 0 0 1px rgba(255,255,255,.25); }
+  .mk.future { opacity: .55; }
+  #timeline { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; align-items: center; gap: 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 6px 14px 6px 6px; z-index: 4;
+    width: min(520px, calc(100vw - 32px)); }
+  #timeline button { width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--line); background: #2a2620;
+    color: var(--ink); cursor: pointer; font-size: 12px; flex: none; }
+  #timeline button:hover { border-color: var(--accent); }
+  #timeline input { flex: 1; accent-color: var(--accent); min-width: 0; }
+  #daylabel { font-size: 12px; color: var(--ink); white-space: nowrap; min-width: 9.5em; text-align: right; }
+  body.big #timeline { display: none !important; }
+  #night { position: fixed; top: 16px; right: 16px; width: 40px; height: 40px; border-radius: 50%; z-index: 4;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); font-size: 18px; cursor: pointer; }
+  #night:hover { border-color: var(--accent); }
   .shade { position: absolute; inset: 0; border-radius: 50%; pointer-events: none;
     background:
       radial-gradient(circle at 32% 28%, rgba(255,255,255,.22), rgba(255,255,255,0) 42%),
@@ -64,7 +78,7 @@
     background: radial-gradient(circle, rgba(200, 235, 255, 0.95), rgba(60, 140, 220, 0.85) 60%, rgba(10, 30, 60, 0.95));
     transition: opacity .28s ease; }
   #flash.on { opacity: 1; }
-  #loading { position: fixed; bottom: 16px; right: 16px; background: var(--panel);
+  #loading { position: fixed; bottom: 64px; right: 16px; background: var(--panel);
     padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); font-size: 12px; color: var(--muted); }
   @media (max-width: 640px) { :root { --globe: 150px; } #globe { left: 10px; top: 10px; } }
 </style>
@@ -86,6 +100,8 @@
   </div>
   <div id="placename"></div>
 </div>
+<div id="timeline" style="display:none"><button id="play" title="Play the history">&#9654;</button><input id="day" type="range" min="0" max="0" step="1"><span id="daylabel"></span></div>
+<button id="night" title="Night">&#9790;</button>
 <div id="hint">Pick a place · grey areas are still unexplored</div>
 <div id="flash"></div>
 <div id="loading">Loading…</div>

@@ -52,7 +52,10 @@ controls.minZoom = 0.4;
 controls.maxZoom = 12;
 
 const clock = new THREE.Clock();
+let dayIdx = null;        // timelapse: index into index.dates (null = latest)
+let night = new URLSearchParams(location.search).get('night') === '1';
 const timeUniform = { value: 0 };
+const nightUniform = { value: 0 };
 const texLoader = new THREE.TextureLoader();
 
 // ---------------------------------------------------------------- shared textures
@@ -264,7 +267,7 @@ function buildWater(info, T) {
   const mat = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
-    uniforms: { time: timeUniform, nmap: { value: shared.nmap }, foam: { value: shared.foam }, sunDir: { value: sunDir } },
+    uniforms: { time: timeUniform, nmap: { value: shared.nmap }, foam: { value: shared.foam }, sunDir: { value: sunDir }, night: nightUniform },
     vertexShader: `
       attribute float depth;
       varying float vDepth; varying vec3 vWorld;
@@ -275,7 +278,7 @@ function buildWater(info, T) {
         gl_Position = projectionMatrix * viewMatrix * wp;
       }`,
     fragmentShader: `
-      uniform float time; uniform sampler2D nmap; uniform sampler2D foam; uniform vec3 sunDir;
+      uniform float time; uniform sampler2D nmap; uniform sampler2D foam; uniform vec3 sunDir; uniform float night;
       varying float vDepth; varying vec3 vWorld;
       void main() {
         if (vDepth < -0.3) discard;
@@ -287,19 +290,19 @@ function buildWater(info, T) {
         float d = max(vDepth, 0.0);
         vec3 shallow = vec3(0.10, 0.36, 0.36);
         vec3 deep = vec3(0.012, 0.07, 0.12);
-        vec3 col = mix(shallow, deep, smoothstep(0.0, 7.0, d));
+        vec3 col = mix(shallow, deep, smoothstep(0.0, 7.0, d)) * mix(1.0, 0.28, night);
         float fres = 0.04 + 0.96 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
-        vec3 sky = vec3(0.55, 0.68, 0.82);
+        vec3 sky = mix(vec3(0.55, 0.68, 0.82), vec3(0.06, 0.09, 0.17), night);
         col = mix(col, sky, clamp(fres, 0.0, 0.35));
         vec3 H = normalize(sunDir + V);
         float spec = pow(max(dot(n, H), 0.0), 2500.0) * 0.5;
-        col += vec3(1.0, 0.93, 0.8) * spec;
+        col += mix(vec3(1.0, 0.93, 0.8), vec3(0.6, 0.7, 0.9), night) * spec;
         // shoreline foam: texture + bands rolling in towards the beach
         float f = texture2D(foam, uv / 5.0 + vec2(time * 0.015, -time * 0.01)).r;
         float shore = 1.0 - smoothstep(0.0, 0.45, d);
         float bands = smoothstep(0.62, 0.95, f + 0.3 * sin(d * 14.0 - time * 1.4));
         float foamAmt = clamp(shore * (0.15 + bands * 0.7), 0.0, 1.0);
-        col = mix(col, vec3(0.86, 0.9, 0.9), foamAmt * 0.7);
+        col = mix(col, vec3(0.86, 0.9, 0.9) * mix(1.0, 0.3, night), foamAmt * 0.7);
         float alpha = mix(0.3, 0.92, smoothstep(0.0, 2.5, d));
         alpha = max(alpha, foamAmt * 0.7);
         gl_FragColor = vec4(col, alpha);
@@ -471,6 +474,8 @@ async function buildObjects(info, onProgress) {
   }
   const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3();
   const group = new THREE.Group();
+  const timed = [];
+  group.userData.timed = timed;
   let done = 0;
   await Promise.all([...byModel.entries()].map(async ([mi, items]) => {
     const parts = await loadModel(info.models[mi]);
@@ -481,6 +486,11 @@ async function buildObjects(info, onProgress) {
       items.forEach((o, k) => {
         im.setMatrixAt(k, m4.compose(p.set(o[1], o[2], o[3]), q.set(o[4], o[5], o[6], o[7]), s.set(o[8], o[9], o[10])));
       });
+      if (items.some((o) => o[11] === 1)) {
+        im.userData.items = items;
+        im.userData.mats = im.instanceMatrix.array.slice();
+        timed.push(im);
+      }
       im.castShadow = true;
       im.receiveShadow = true;
       im.computeBoundingSphere();
@@ -566,6 +576,11 @@ async function loadRegion(slug, arrive) {
   const objects = await buildObjects(info, (d, n) => { $('loading').textContent = `Loading models ${d}/${n}…`; });
   if (token !== loadToken) return;
   world.add(objects);
+  region.timed = objects.userData.timed;
+  region.fires = buildFires(info, T);
+  world.add(region.fires.group);
+  applyNight();
+  applyDay();
 
   const lbl = $('labels');
   lbl.innerHTML = '';
@@ -577,10 +592,190 @@ async function loadRegion(slug, arrive) {
     if (portal) el.title = L.target ? `Portal to ${L.target.title}` : 'Portal (no partner portal)';
     if (L.target) el.onclick = () => travel(L.target);
     lbl.appendChild(el);
-    return { el, portal, target: L.target, base: new THREE.Vector3(L.pos[0], L.pos[1] + 1.6, L.pos[2]),
+    // the sign/portal piece itself, so the label follows the timeline
+    const obj = info.objects.find((o) => o[11] === 1 && Math.abs(o[1] - L.pos[0]) < 0.05 && Math.abs(o[3] - L.pos[2]) < 0.05);
+    return { el, portal, obj, target: L.target, base: new THREE.Vector3(L.pos[0], L.pos[1] + 1.6, L.pos[2]),
              pos: new THREE.Vector3(L.pos[0], L.pos[1] + (portal ? 4 : 2.2), L.pos[2]) };
   });
   $('loading').style.display = 'none';
+}
+
+// ---------------------------------------------------------------- timelapse
+const ZERO = new THREE.Matrix4().makeScale(0, 0, 0).elements;
+function visibleOn(o, d) { return o[11] !== 1 || o.length < 14 || (o[12] <= d && d <= o[13]); }
+function regionDay() {
+  // the region's dates may lag the index's (a place exported before the latest snapshot)
+  const dates = region?.info.dates || [];
+  if (!dates.length) return 0;
+  const want = index.dates[dayIdx ?? index.dates.length - 1];
+  let k = 0;
+  dates.forEach((dd, i) => { if (dd <= want) k = i; });
+  return k;
+}
+function applyDay() {
+  if (!region || !region.timed) return;
+  const d = regionDay();
+  for (const im of region.timed) {
+    const arr = im.instanceMatrix.array, src = im.userData.mats;
+    im.userData.items.forEach((o, k) => {
+      if (visibleOn(o, d)) arr.set(src.subarray(k * 16, k * 16 + 16), k * 16);
+      else arr.set(ZERO, k * 16);
+    });
+    im.instanceMatrix.needsUpdate = true;
+  }
+  for (const f of region.fires?.items || []) f.on = visibleOn(f.o, d);
+  drawFog();
+  updateTimelineUI();
+}
+
+let fogCtx = null, zoneList = null, fogImg = null;
+function drawFog() {
+  if (!fogCtx || !zoneList) return;
+  const day = dayIdx ?? index.dates.length - 1;
+  const c = fogCtx.canvas, N = c.width, R = index.radius;
+  const mask = document.createElement('canvas');
+  mask.width = mask.height = N;
+  const m = mask.getContext('2d');
+  m.fillStyle = '#fff';
+  const z = (64 / (2 * R)) * N;
+  for (const [zx, zy, d] of zoneList) {
+    if (d > day) continue;
+    m.fillRect(((zx * 64 - 32 + R) / (2 * R)) * N, ((R - (zy * 64 + 32)) / (2 * R)) * N, z + 0.6, z + 0.6);
+  }
+  fogCtx.globalCompositeOperation = 'source-over';
+  fogCtx.filter = 'none';
+  fogCtx.clearRect(0, 0, N, N);
+  fogCtx.drawImage(fogImg, 0, 0, N, N);
+  fogCtx.globalCompositeOperation = 'destination-out';
+  fogCtx.filter = 'blur(1.5px)';
+  fogCtx.drawImage(mask, 0, 0);
+  fogCtx.filter = 'none';
+}
+
+function fmtDate(iso) {
+  return new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+function updateTimelineUI() {
+  const n = index.dates.length, d = dayIdx ?? n - 1;
+  $('day').value = d;
+  $('daylabel').textContent = fmtDate(index.dates[d]) + (d === n - 1 ? ' · today' : '');
+  document.querySelectorAll('.mk').forEach((m) => {
+    const r = index.regions.find((x) => x.slug === m.dataset.slug);
+    m.classList.toggle('future', r.first != null && r.first > d);
+  });
+}
+let playTimer = null;
+function setDay(d) {
+  dayIdx = d >= index.dates.length - 1 ? null : d;
+  applyDay();
+}
+function togglePlay(force) {
+  const playing = force ?? !playTimer;
+  clearInterval(playTimer);
+  playTimer = null;
+  $('play').textContent = playing ? '\u275A\u275A' : '\u25B6';
+  if (!playing) return;
+  let d = (dayIdx ?? index.dates.length - 1);
+  if (d >= index.dates.length - 1) d = -1;   // restart from the first day
+  const step = () => {
+    d++;
+    setDay(d);
+    if (d >= index.dates.length - 1) togglePlay(false);
+  };
+  step();
+  playTimer = setInterval(step, 1400);
+}
+function buildTimeline() {
+  const n = index.dates.length;
+  if (n < 2) return;
+  $('timeline').style.display = '';
+  $('day').max = n - 1;
+  $('day').oninput = (e) => { togglePlay(false); setDay(+e.target.value); };
+  $('play').onclick = () => togglePlay();
+  updateTimelineUI();
+}
+
+// ---------------------------------------------------------------- night
+const FIRE_RE = /torch|fire_pit|bonfire|hearth|brazier|candle|lantern|sconce|smelter|kiln|blastfurnace|forge$|piece_forge|bathtub|firepit/i;
+let glowTex = null;
+function glowTexture() {
+  if (glowTex) return glowTex;
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(255,240,200,1)');
+  grad.addColorStop(0.2, 'rgba(255,170,70,0.8)');
+  grad.addColorStop(0.55, 'rgba(255,110,30,0.22)');
+  grad.addColorStop(1, 'rgba(255,90,20,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  glowTex = new THREE.CanvasTexture(c);
+  glowTex.colorSpace = THREE.SRGBColorSpace;
+  return glowTex;
+}
+function buildFires(info, T) {
+  const group = new THREE.Group();
+  const items = [];
+  const flameMat = new THREE.SpriteMaterial({ map: glowTexture(), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
+  const poolMat = new THREE.MeshBasicMaterial({ map: glowTexture(), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.55 });
+  const poolGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+  for (const o of info.objects) {
+    if (o[11] !== 1) continue;
+    const name = info.models[o[0]];
+    if (!FIRE_RE.test(name)) continue;
+    const mi = modelInfo[name];
+    const low = /fire_pit|bonfire|hearth|firepit|smelter|kiln|forge|blastfurnace/i.test(name);
+    const h = low ? 0.6 : (mi ? mi.max[1] * o[9] * 0.92 : 1.5);
+    const big = /bonfire|hearth|fire_pit|firepit/i.test(name) ? 1.6 : 1;
+    const flame = new THREE.Sprite(flameMat.clone());
+    flame.position.set(o[1], o[2] + h, o[3]);
+    flame.scale.setScalar(3.2 * big);
+    const pool = new THREE.Mesh(poolGeo, poolMat.clone());
+    const gy = T.sample(o[1], o[3]);
+    pool.position.set(o[1], Math.max(gy, o[2]) + 0.12, o[3]);
+    pool.scale.setScalar(14 * big);
+    group.add(flame, pool);
+    items.push({ o, flame, pool, phase: Math.random() * 10, on: true, pos: flame.position });
+  }
+  // a few real lights on the fires nearest the middle of the place, so walls catch the glow
+  const lights = [];
+  const near = [...items].sort((a, b) => a.pos.distanceTo(region.focus) - b.pos.distanceTo(region.focus)).slice(0, 8);
+  for (const it of near) {
+    const L = new THREE.PointLight(0xff9a4a, 0, 22, 1.6);
+    L.position.copy(it.pos);
+    it.light = L;
+    lights.push(L);
+  }
+  return { group, items, lights };
+}
+function applyNight() {
+  nightUniform.value = night ? 1 : 0;
+  hemi.color.set(night ? 0x5d6f9e : 0xcfe3ff);
+  hemi.groundColor.set(night ? 0x1a1c2a : 0x5a4a32);
+  hemi.intensity = night ? 0.55 : 1.1;
+  sun.color.set(night ? 0x9fb4ff : 0xfff1d6);
+  sun.intensity = night ? 0.45 : 2.6;
+  scene.background.set(night ? 0x0b0e16 : 0x1b1915);
+  renderer.toneMappingExposure = night ? 1.25 : 1.05;
+  $('night').textContent = night ? '\u2600' : '\u263E';
+  $('night').title = night ? 'Day' : 'Night';
+  if (!region || !region.fires) return;
+  region.fires.group.visible = night;
+  for (const L of region.fires.lights) {
+    if (night && !L.parent) world.add(L);
+    if (!night && L.parent) L.parent.remove(L);
+  }
+}
+function animateFires(t) {
+  if (!night || !region?.fires) return;
+  for (const f of region.fires.items) {
+    const k = 0.82 + 0.12 * Math.sin(t * 9 + f.phase) + 0.08 * Math.sin(t * 23 + f.phase * 3);
+    f.flame.visible = f.pool.visible = f.on;
+    f.flame.material.opacity = k;
+    f.pool.material.opacity = 0.5 * k;
+    if (f.light) f.light.intensity = f.on ? 55 * k : 0;
+  }
 }
 
 function updateLabels() {
@@ -589,9 +784,10 @@ function updateLabels() {
   const placed = [];
   const zoomedIn = camera.zoom > 1.8;
   const big = document.body.classList.contains('big');
+  const d = regionDay();
   for (const L of labelEls) {
     v.copy(L.pos).project(camera);
-    let on = (L.portal || zoomedIn) && !big && Math.abs(v.x) < 1.05 && Math.abs(v.y) < 1.05;
+    let on = (L.portal || zoomedIn) && !big && (!L.obj || visibleOn(L.obj, d)) && Math.abs(v.x) < 1.05 && Math.abs(v.y) < 1.05;
     const x = (v.x * 0.5 + 0.5) * w, y = (-v.y * 0.5 + 0.5) * h;
     if (on) {
       const bw = L.w || 80;
@@ -654,7 +850,7 @@ function portalAt(clientX, clientY) {
   let best = null;
   const r = 34 * Math.min(2.5, Math.max(0.6, camera.zoom));   // px
   for (const L of labelEls) {
-    if (!L.target) continue;
+    if (!L.target || (L.obj && !visibleOn(L.obj, regionDay()))) continue;
     v.copy(L.base).project(camera);
     const d = Math.hypot((v.x * 0.5 + 0.5) * innerWidth - clientX, (-v.y * 0.5 + 0.5) * innerHeight - clientY);
     if (d < r && (!best || d < best.d)) best = { L, d };
@@ -695,6 +891,20 @@ function toggleGlobe(force) {
 
 function buildGlobe() {
   const mk = $('markers');
+  if (index.dates && index.dates.length > 1) {
+    // draw the fog of war ourselves so it can follow the timeline
+    const img = $('layer').querySelector('img');
+    img.src = 'assets/worldmap_color.png';
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = 1024;
+    cv.className = 'fog';
+    img.after(cv);
+    fogCtx = cv.getContext('2d');
+    fogImg = new Image();
+    fogImg.onload = drawFog;
+    fogImg.src = 'assets/worldmap_fog.png';
+    fetch('assets/zones.json').then((r) => r.json()).then((z) => { zoneList = z; drawFog(); });
+  }
   for (const r of index.regions) {
     const el = document.createElement('div');
     el.className = 'mk';
@@ -723,6 +933,17 @@ async function init() {
     loadShared(),
   ]);
   buildGlobe();
+  const dq = new URLSearchParams(location.search).get('day');
+  if (dq != null && index.dates?.length > 1) dayIdx = Math.min(+dq, index.dates.length - 1);
+  buildTimeline();
+  $('night').onclick = () => {
+    night = !night;
+    const u = new URL(location.href);
+    if (night) u.searchParams.set('night', '1'); else u.searchParams.delete('night');
+    history.replaceState(null, '', u);
+    applyNight();
+  };
+  applyNight();
   const q = new URLSearchParams(location.search).get('place');
   setPlace(index.regions.some((r) => r.slug === q) ? q : index.regions[0].slug);
 }
@@ -736,6 +957,7 @@ window.addEventListener('resize', () => {
 function loop() {
   requestAnimationFrame(loop);
   timeUniform.value = clock.getElapsedTime();
+  animateFires(timeUniform.value);
   controls.update();
   renderer.render(scene, camera);
   updateLabels();

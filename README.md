@@ -16,6 +16,7 @@ terrain from the seed, and pulls models/textures out of the server's game files.
 | Terrain: port of the world generator + terrain edits | `tools/terrain.py`, `tools/export_region.py` |
 | Models and textures from the game's asset bundles | `tools/export_models.py`, `tools/export_terrain_textures.py` |
 | World map with explored areas | `tools/export_worldmap.py` |
+| Timelapse history (when pieces existed, when zones were explored) | `tools/history.py` |
 | Everything, in order | `tools/build.py` |
 | Website (three.js) | `web/` |
 
@@ -30,6 +31,8 @@ cd web && python3 -m http.server 8765
 ```
 
 `update.sh` settings are at the top of the file (where the save and game files live).
+Each build records the current save in the timelapse history (`data/history/`). To fill in the past
+from old saves: `uv run python tools/history.py backfill <backup .tar.gz or folder> ...`.
 Name places or change their size in `regions.json`.
 
 ## Server deployment

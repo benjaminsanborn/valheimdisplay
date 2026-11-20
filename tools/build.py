@@ -18,6 +18,7 @@ newest_game_file = max(os.path.getmtime(os.path.join(dp, f)) for dp, _, fs in os
 if not os.path.exists(names_json) or os.path.getmtime(names_json) < newest_game_file:
     print('indexing prefab names...', flush=True)
     subprocess.run(py + ['tools/prefab_names.py', GAME, names_json], check=True)
+subprocess.run(py + ['tools/history.py', 'add', 'data/world'], check=True)   # timelapse history
 regions = build_places()   # which places to render: see tools/places.py for the rule
 json.dump(regions, open('data/places.json', 'w'), indent=1)
 only = [a for a in sys.argv[1:] if not a.startswith('--')]
@@ -71,6 +72,18 @@ for r in regions:
 meta = vworld.read_meta('data/world')
 idx = dict(world=meta.name, seed=meta.seed_name,
            radius=10500, regions=[dict(slug=r['slug'], title=r['title'], x=r['x'], z=r['z']) for r in regions if os.path.exists(f"web/assets/regions/{r['slug']}.json")])
+# timelapse: history dates and the day each zone was first explored
+hist = json.load(open('data/history/built.json'))
+zones = json.load(open('data/history/zones.json'))
+dates = sorted(set(hist['dates']))
+di = {d: i for i, d in enumerate(dates)}
+idx['dates'] = dates
+for r in idx['regions']:   # first day anything was built there, for dimming future places on the map
+    info = json.load(open(f"web/assets/regions/{r['slug']}.json"))
+    firsts = [info['dates'][o[12]] for o in info['objects'] if o[11] == 1 and len(o) > 13]
+    r['first'] = di[min(firsts)] if firsts else 0
+json.dump([[int(a), int(b), di.get(d, 0)] for k, d in zones.items() for a, b in [k.split(',')]],
+          open('web/assets/zones.json', 'w'), separators=(',', ':'))
 json.dump(idx, open('web/assets/regions/index.json', 'w'), indent=1)
 print('regions:', [r['slug'] for r in idx['regions']])
 

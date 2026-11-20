@@ -59,10 +59,19 @@ explored = explored[np.clip(ii.astype(int), 0, N - 1)][:, np.clip(ii.astype(int)
 grey = gaussian_filter(img.mean(-1), 3.0)[..., None]
 fog = np.array([46, 50, 58]) * 0.75 + grey * 0.22
 e = explored[..., None]
-img = img * e + fog * (1 - e)
-# round world edge
 r = np.hypot(X, Z)
-img[r > R] = (0, 0, 0)
 alpha = np.clip((R - r) / (px * 1.5), 0, 1)
-Image.fromarray(np.dstack([np.clip(img, 0, 255), alpha * 255]).astype(np.uint8), 'RGBA').save(out, optimize=True)
+
+
+def write(path, pixels):
+    pixels = pixels.copy()
+    pixels[r > R] = (0, 0, 0)
+    Image.fromarray(np.dstack([np.clip(pixels, 0, 255), alpha * 255]).astype(np.uint8), 'RGBA').save(path, optimize=True)
+
+
+write(out, img * e + fog * (1 - e))            # today's map, fog of war baked in
+# for the timelapse the browser draws the fog itself: an unfogged map plus an all-fog layer
+base = out[:-4] if out.endswith('.png') else out
+write(base + '_color.png', img)
+write(base + '_fog.png', fog * np.ones_like(img))
 print(f'world map {N}px, {len(zones)} explored zones -> {out}')
