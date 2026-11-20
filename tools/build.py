@@ -82,6 +82,7 @@ for r in idx['regions']:   # first day anything was built there, for dimming fut
     info = json.load(open(f"web/assets/regions/{r['slug']}.json"))
     firsts = [info['dates'][o[12]] for o in info['objects'] if o[11] == 1 and len(o) > 13]
     r['first'] = di[min(firsts)] if firsts else 0
+    r['biome'] = info.get('biome')
 json.dump([[int(a), int(b), di.get(d, 0)] for k, d in zones.items() for a, b in [k.split(',')]],
           open('web/assets/zones.json', 'w'), separators=(',', ':'))
 json.dump(idx, open('web/assets/regions/index.json', 'w'), indent=1)

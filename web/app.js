@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createWeather, pickWeather, params as weatherParams, BIOME_WEATHER, BIOME_NAMES, WEATHER } from './weather.js';
 
 const $ = (id) => document.getElementById(id);
 const SUN_ANGLE = 215;
@@ -56,6 +57,11 @@ let dayIdx = null;        // timelapse: index into index.dates (null = latest)
 let night = new URLSearchParams(location.search).get('night') === '1';
 const timeUniform = { value: 0 };
 const nightUniform = { value: 0 };
+const overcastUniform = { value: 0 };
+const windUniform = { value: 1 };
+const weather = createWeather(scene, nightUniform);
+// 'auto' = picked for the place's biome and the day; or a WEATHER key; or 'off'
+let weatherMode = new URLSearchParams(location.search).get('weather') || 'auto';
 const texLoader = new THREE.TextureLoader();
 
 // ---------------------------------------------------------------- shared textures
@@ -267,19 +273,25 @@ function buildWater(info, T) {
   const mat = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
-    uniforms: { time: timeUniform, nmap: { value: shared.nmap }, foam: { value: shared.foam }, sunDir: { value: sunDir }, night: nightUniform },
+    fog: true,
+    uniforms: { ...THREE.UniformsUtils.clone(THREE.UniformsLib.fog), time: timeUniform, nmap: { value: shared.nmap },
+      foam: { value: shared.foam }, sunDir: { value: sunDir }, night: nightUniform, overcast: overcastUniform },
     vertexShader: `
       attribute float depth;
       varying float vDepth; varying vec3 vWorld;
+      #include <fog_pars_vertex>
       void main() {
         vDepth = depth;
         vec4 wp = modelMatrix * vec4(position, 1.0);
         vWorld = wp.xyz;
-        gl_Position = projectionMatrix * viewMatrix * wp;
+        vec4 mvPosition = viewMatrix * wp;
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
       }`,
     fragmentShader: `
-      uniform float time; uniform sampler2D nmap; uniform sampler2D foam; uniform vec3 sunDir; uniform float night;
+      uniform float time; uniform sampler2D nmap; uniform sampler2D foam; uniform vec3 sunDir; uniform float night; uniform float overcast;
       varying float vDepth; varying vec3 vWorld;
+      #include <fog_pars_fragment>
       void main() {
         if (vDepth < -0.3) discard;
         vec2 uv = vWorld.xz;
@@ -292,10 +304,10 @@ function buildWater(info, T) {
         vec3 deep = vec3(0.012, 0.07, 0.12);
         vec3 col = mix(shallow, deep, smoothstep(0.0, 7.0, d)) * mix(1.0, 0.28, night);
         float fres = 0.04 + 0.96 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
-        vec3 sky = mix(vec3(0.55, 0.68, 0.82), vec3(0.06, 0.09, 0.17), night);
+        vec3 sky = mix(mix(vec3(0.55, 0.68, 0.82), vec3(0.36, 0.39, 0.42), overcast), vec3(0.06, 0.09, 0.17), night);
         col = mix(col, sky, clamp(fres, 0.0, 0.35));
         vec3 H = normalize(sunDir + V);
-        float spec = pow(max(dot(n, H), 0.0), 2500.0) * 0.5;
+        float spec = pow(max(dot(n, H), 0.0), 2500.0) * 0.5 * (1.0 - 0.85 * overcast);
         col += mix(vec3(1.0, 0.93, 0.8), vec3(0.25, 0.3, 0.4), night) * spec;
         // shoreline foam: texture + bands rolling in towards the beach
         float f = texture2D(foam, uv / 5.0 + vec2(time * 0.015, -time * 0.01)).r;
@@ -308,6 +320,7 @@ function buildWater(info, T) {
         gl_FragColor = vec4(col, alpha);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
+        #include <fog_fragment>
       }`,
   });
   const water = new THREE.Mesh(g, mat);
@@ -415,15 +428,16 @@ function buildGrass(info, T) {
   const mat = new THREE.MeshStandardMaterial({ map: shared.grass, alphaTest: 0.25, alphaToCoverage: true, side: THREE.DoubleSide, roughness: 1 });
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.time = timeUniform;
+    sh.uniforms.wind = windUniform;
     // light both sides of a blade as if it faced the sky (no dark back faces)
     sh.fragmentShader = sh.fragmentShader.replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n normal = normalize(vNormal);');
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nuniform float time;')
+      .replace('#include <common>', '#include <common>\nuniform float time; uniform float wind;')
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vec3 ip = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
         float sway = sin(time * 1.6 + ip.x * 0.35 + ip.z * 0.22) + 0.5 * sin(time * 2.7 + ip.x * 0.9);
-        transformed.x += sway * 0.09 * uv.y;
-        transformed.z += sway * 0.05 * uv.y;`);
+        transformed.x += sway * 0.09 * wind * uv.y;
+        transformed.z += sway * 0.05 * wind * uv.y;`);
   };
   const mesh = new THREE.InstancedMesh(grassGeometry(), mat, Math.max(1, items.length));
   const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
@@ -578,6 +592,7 @@ async function loadRegion(slug, arrive) {
   world.add(objects);
   region.timed = objects.userData.timed;
   region.fires = buildFires(info, T);
+  weather.setRegion(T, info.water);
   world.add(region.fires.group);
   applyNight();
   applyDay();
@@ -624,6 +639,7 @@ function applyDay() {
     im.instanceMatrix.needsUpdate = true;
   }
   for (const f of region.fires?.items || []) f.on = visibleOn(f.o, d);
+  refreshWeather();
   drawFog();
   updateTimelineUI();
 }
@@ -664,6 +680,42 @@ function updateTimelineUI() {
     m.classList.toggle('future', r.first != null && r.first > d);
   });
 }
+// ---------------------------------------------------------------- weather
+const placeBiome = (r) => r?.biome || region?.info.biome || 'Meadows';
+const autoWeather = (r) => pickWeather(placeBiome(r), r.slug, index.dates?.[dayIdx ?? index.dates.length - 1] || '');
+function weatherKey() {
+  const r = index?.regions.find((x) => x.slug === current);
+  if (weatherMode === 'off') return null;
+  if (weatherMode !== 'auto' && WEATHER[weatherMode]) return weatherMode;
+  return r ? autoWeather(r) : null;
+}
+function refreshWeather() {
+  const key = weatherKey();
+  weather.set(key);
+  applyLighting();
+  const r = index?.regions.find((x) => x.slug === current);
+  if (!r) return;
+  const biome = r.biome || region?.info.biome;
+  const parts = [biome && BIOME_NAMES[biome], key ? WEATHER[key].name : null, `${Math.round(r.x)}, ${Math.round(r.z)}`].filter(Boolean);
+  const sm = $('placename').querySelector('small');
+  if (sm) sm.textContent = parts.join(' \u00b7 ');
+  const btn = $('weather');
+  btn.classList.toggle('off', weatherMode === 'off');
+  btn.title = weatherMode === 'off' ? 'Weather: off' : `Weather: ${key ? WEATHER[key].name : 'clear'}${weatherMode === 'auto' ? ' (for this biome and day)' : ''}`;
+}
+// the button walks through: this day's weather, the biome's other weathers, off
+function cycleWeather() {
+  const r = index.regions.find((x) => x.slug === current);
+  const opts = (BIOME_WEATHER[placeBiome(r)] || BIOME_WEATHER.Meadows).map((o) => o[0]);
+  const auto = autoWeather(r);
+  const seq = ['auto', ...opts.filter((k) => k !== auto), 'off'];
+  weatherMode = seq[(seq.indexOf(weatherMode) + 1) % seq.length] || 'auto';
+  const u = new URL(location.href);
+  if (weatherMode === 'auto') u.searchParams.delete('weather'); else u.searchParams.set('weather', weatherMode);
+  history.replaceState(null, '', u);
+  refreshWeather();
+}
+
 let playTimer = null;
 function setDay(d) {
   dayIdx = d >= index.dates.length - 1 ? null : d;
@@ -717,8 +769,8 @@ function glowTexture() {
 function buildFires(info, T) {
   const group = new THREE.Group();
   const items = [];
-  const flameMat = new THREE.SpriteMaterial({ map: glowTexture(), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
-  const poolMat = new THREE.MeshBasicMaterial({ map: glowTexture(), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.55 });
+  const flameMat = new THREE.SpriteMaterial({ map: glowTexture(), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, fog: false });
+  const poolMat = new THREE.MeshBasicMaterial({ map: glowTexture(), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.55, fog: false });
   const poolGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
   for (const o of info.objects) {
     if (o[11] !== 1) continue;
@@ -749,14 +801,33 @@ function buildFires(info, T) {
   }
   return { group, items, lights };
 }
-function applyNight() {
-  nightUniform.value = night ? 1 : 0;
+// day/night and the weather together; cheap enough to run every frame (lightning)
+const tint = new THREE.Color();
+function applyLighting() {
+  const p = weather.state.p, f = weather.state.flash;
   hemi.color.set(night ? 0x5d6f9e : 0xcfe3ff);
   hemi.groundColor.set(night ? 0x1a1c2a : 0x5a4a32);
-  hemi.intensity = night ? 0.55 : 1.1;
   sun.color.set(night ? 0x9fb4ff : 0xfff1d6);
-  sun.intensity = night ? 0.45 : 2.6;
-  scene.background.set(night ? 0x0b0e16 : 0x1b1915);
+  if (p.tint) {
+    tint.set(p.tint[0]);
+    hemi.color.lerp(tint, p.tint[1]);
+    sun.color.lerp(tint, p.tint[1]);
+  }
+  hemi.intensity = (night ? 0.55 : 1.1) * p.hemi + f * (night ? 3 : 1.6);
+  sun.intensity = (night ? 0.45 : 2.6) * p.sun;
+  overcastUniform.value = p.overcast;
+  windUniform.value = 1 + Math.hypot(p.wind[0], p.wind[1]) / 3;
+  if (p.fog) {
+    scene.fog.color.copy(weather.state.fogColor).multiplyScalar(night ? 0.13 : 1);
+    if (f) scene.fog.color.lerp(tint.set(0xdde6ff), Math.min(1, f * 0.25));
+    scene.background.copy(scene.fog.color);
+  } else {
+    scene.background.set(night ? 0x0b0e16 : 0x1b1915);
+  }
+}
+function applyNight() {
+  nightUniform.value = night ? 1 : 0;
+  applyLighting();
   renderer.toneMappingExposure = night ? 1.25 : 1.05;
   $('night').textContent = night ? '\u2600' : '\u263E';
   $('night').title = night ? 'Day' : 'Night';
@@ -875,7 +946,7 @@ function setPlace(slug, arrive) {
   current = slug;
   const r = index.regions.find((x) => x.slug === slug);
   document.querySelectorAll('.mk').forEach((m) => m.classList.toggle('on', m.dataset.slug === slug));
-  $('placename').innerHTML = `${r.title}<small>${Math.round(r.x)}, ${Math.round(r.z)}</small>`;
+  $('placename').innerHTML = `${r.title}<small></small>`;
   const u = new URL(location.href);
   u.searchParams.set('place', slug);
   history.replaceState(null, '', u);
@@ -943,6 +1014,7 @@ async function init() {
     history.replaceState(null, '', u);
     applyNight();
   };
+  $('weather').onclick = cycleWeather;
   applyNight();
   const q = new URLSearchParams(location.search).get('place');
   setPlace(index.regions.some((r) => r.slug === q) ? q : index.regions[0].slug);
@@ -956,8 +1028,11 @@ window.addEventListener('resize', () => {
 
 function loop() {
   requestAnimationFrame(loop);
-  timeUniform.value = clock.getElapsedTime();
+  const dt = Math.min(clock.getDelta(), 0.1);
+  timeUniform.value = clock.elapsedTime;
   animateFires(timeUniform.value);
+  weather.update(timeUniform.value, dt, camera, controls.target, orthoSize, window.innerHeight);
+  if (weather.state.p.lightning) applyLighting();
   controls.update();
   renderer.render(scene, camera);
   updateLabels();

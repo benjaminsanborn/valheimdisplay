@@ -203,6 +203,11 @@ def main():
                 terrain.MOUNTAIN: 4, terrain.DEEPNORTH: 4, terrain.OCEAN: 5, terrain.MISTLANDS: 1, terrain.ASHLANDS: 6}
     for b, l in layer_of.items():
         wts[..., l] += biome == b
+    # the place's biome (for the viewer's weather): what the ground near the middle of the place is
+    near = np.hypot(wxs - cx, wzs - cz) < max(30.0, radius / 1.5 * 0.7)
+    counts = {terrain.BIOME_NAMES[int(b)]: int(n) for b, n in zip(*np.unique(biome[near], return_counts=True))}
+    land = {k: v for k, v in counts.items() if k != 'Ocean'}
+    place_biome = max(land or counts, key=(land or counts).get)
     for l in range(NL):  # soften hard biome borders
         wts[..., l] = gaussian_filter(wts[..., l], 4.0)
     # meadows: patches of forest floor for variety
@@ -298,6 +303,8 @@ def main():
         slug=slug, title=title, center=[cx, cz], seed=meta.seed_name,
         grid=dict(w=W, d=D, x0=ox - cx, z0=oz - cz, step=1.0),
         water=WATER_LEVEL,
+        biome=place_biome,
+        biomes={k: round(v / sum(counts.values()), 3) for k, v in sorted(counts.items(), key=lambda kv: -kv[1])},
         terrain_format=2,
         models=list(model_index.keys()),
         objects=objects,

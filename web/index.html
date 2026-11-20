@@ -43,7 +43,10 @@
   body.big #timeline { display: none !important; }
   #night { position: fixed; top: 16px; right: 16px; width: 40px; height: 40px; border-radius: 50%; z-index: 4;
     border: 1px solid var(--line); background: var(--panel); color: var(--ink); font-size: 18px; cursor: pointer; }
-  #night:hover { border-color: var(--accent); }
+  #night:hover, #weather:hover { border-color: var(--accent); }
+  #weather { position: fixed; top: 16px; right: 64px; width: 40px; height: 40px; border-radius: 50%; z-index: 4;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); font-size: 18px; cursor: pointer; }
+  #weather.off { color: var(--muted); text-decoration: line-through; }
   .shade { position: absolute; inset: 0; border-radius: 50%; pointer-events: none;
     background:
       radial-gradient(circle at 32% 28%, rgba(255,255,255,.22), rgba(255,255,255,0) 42%),
@@ -102,6 +105,7 @@
 </div>
 <div id="timeline" style="display:none"><button id="play" title="Play the history">&#9654;</button><input id="day" type="range" min="0" max="0" step="1"><span id="daylabel"></span></div>
 <button id="night" title="Night">&#9790;</button>
+<button id="weather" title="Weather">&#9729;&#xFE0E;</button>
 <div id="hint">Pick a place · grey areas are still unexplored</div>
 <div id="flash"></div>
 <div id="loading">Loading…</div>

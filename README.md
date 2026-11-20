@@ -19,6 +19,7 @@ terrain from the seed, and pulls models/textures out of the server's game files.
 | Timelapse history (when pieces existed, when zones were explored) | `tools/history.py` |
 | Everything, in order | `tools/build.py` |
 | Website (three.js) | `web/` |
+| Weather per biome (rain, snow, mist, ash, lightning) | `web/weather.js` |
 
 Nothing extracted from the game is committed: `data/` and `web/assets/` are generated locally
 (see `.gitignore`).
