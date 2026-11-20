@@ -296,7 +296,7 @@ function buildWater(info, T) {
         col = mix(col, sky, clamp(fres, 0.0, 0.35));
         vec3 H = normalize(sunDir + V);
         float spec = pow(max(dot(n, H), 0.0), 2500.0) * 0.5;
-        col += mix(vec3(1.0, 0.93, 0.8), vec3(0.6, 0.7, 0.9), night) * spec;
+        col += mix(vec3(1.0, 0.93, 0.8), vec3(0.25, 0.3, 0.4), night) * spec;
         // shoreline foam: texture + bands rolling in towards the beach
         float f = texture2D(foam, uv / 5.0 + vec2(time * 0.015, -time * 0.01)).r;
         float shore = 1.0 - smoothstep(0.0, 0.45, d);
