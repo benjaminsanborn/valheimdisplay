@@ -16,7 +16,9 @@ terrain from the seed, and pulls models/textures out of the server's game files.
 | Terrain: port of the world generator + terrain edits | `tools/terrain.py`, `tools/export_region.py` |
 | Models and textures from the game's asset bundles | `tools/export_models.py`, `tools/export_terrain_textures.py` |
 | World map with explored areas | `tools/export_worldmap.py` |
-| Timelapse history (when pieces existed, when zones were explored) | `tools/history.py` |
+| Timelapse history (when pieces existed, when zones were explored, bosses, in-game day) | `tools/history.py` |
+| Players: hours, deaths, who's online (from the server log) | `tools/players.py` |
+| Boss trophy icons | `tools/export_icons.py` |
 | Everything, in order | `tools/build.py` |
 | Website (three.js) | `web/` |
 | Weather per biome (rain, snow, mist, ash, lightning) | `web/weather.js` |
@@ -43,4 +45,6 @@ On the game server (`deploy/`):
 - `valheimdisplay.caddy` → `/etc/caddy/sites/` serves https://valheim.goku.host
   from `/var/www/valheimdisplay`.
 - `valheimdisplay-update.{service,timer}` → `~/.config/systemd/user/` rebuilds every night at 04:30
+- `valheimdisplay-players.{service,timer}` → `~/.config/systemd/user/` refreshes player stats every 3 minutes
+  (the user running it must be able to read the `valheim.service` journal)
   (`systemctl --user list-timers`, logs: `journalctl --user -u valheimdisplay-update`).

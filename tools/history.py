@@ -3,7 +3,8 @@
   history.py add <world dir>            record a save (dated by its _main.N.ok file)
   history.py backfill <tar.gz|dir> ...  record every save found in backups (tarballs or folders)
 
-Keeps data/history/built.json and data/history/zones.json. Snapshots can be added in any order.
+Keeps data/history/built.json, zones.json and world.json (the in-game day of each save, and the
+first save each global key, like a boss kill, appeared in). Snapshots can be added in any order.
 A piece is identified by prefab + exact position, so a piece that was torn down keeps its
 first/last dates and can still be shown when looking at an earlier day.
 """
@@ -22,6 +23,7 @@ import vworld
 from vworld import stable_hash
 
 HIST = 'data/history'
+DAY_SECONDS = 1200  # EnvMan.m_dayLengthSec
 H_CREATOR = stable_hash('creator')
 H_SCALE = stable_hash('scale')
 
@@ -33,12 +35,15 @@ def piece_key(name, pos):
 def load():
     built = json.load(open(f'{HIST}/built.json')) if os.path.exists(f'{HIST}/built.json') else {'dates': [], 'pieces': {}}
     zones = json.load(open(f'{HIST}/zones.json')) if os.path.exists(f'{HIST}/zones.json') else {}
+    world = json.load(open(f'{HIST}/world.json')) if os.path.exists(f'{HIST}/world.json') else {}
+    built['world'] = {'days': {}, 'keys': {}, **world}
     return built, zones
 
 
 def save(built, zones):
     os.makedirs(HIST, exist_ok=True)
     built['dates'] = sorted(set(built['dates']))
+    json.dump(built.pop('world'), open(f'{HIST}/world.json', 'w'), indent=1)
     json.dump(built, open(f'{HIST}/built.json', 'w'), separators=(',', ':'))
     json.dump(zones, open(f'{HIST}/zones.json', 'w'), separators=(',', ':'))
 
@@ -68,7 +73,12 @@ def add(world, built, zones, names):
         else:
             p['first'] = min(p['first'], day)
             p['last'] = max(p['last'], day)
-    for zx, zy in vworld.read_generated_zones(world):
+    state = vworld.read_world_state(world)
+    w = built['world']
+    w['days'][day] = max(w['days'].get(day, 0), int(state['net_time'] // DAY_SECONDS))
+    for k in state['global_keys']:
+        w['keys'][k] = min(w['keys'].get(k, day), day)
+    for zx, zy in state['zones']:
         if abs(zx) <= 170 and abs(zy) <= 170:
             k = f'{zx},{zy}'
             zones[k] = min(zones.get(k, day), day)

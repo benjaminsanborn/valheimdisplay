@@ -40,6 +40,7 @@ if need:
     subprocess.run(py + ['tools/export_models.py', GAME, 'web/assets', '--list', 'data/todo_models.txt'], check=True)
     manifest = json.load(open('web/assets/models.json'))
     open('data/no_model.txt', 'a').write(''.join(n + '\n' for n in need if n not in manifest))
+subprocess.run(py + ['tools/export_icons.py', GAME, 'web/assets/icons'], check=True)
 subprocess.run(py + ['tools/export_worldmap.py', 'data/world', 'web/assets/worldmap.png', '1024'], check=True)
 
 # link portals: each portal label gets the place + spot its partner (same tag) is in
@@ -83,6 +84,48 @@ for r in idx['regions']:   # first day anything was built there, for dimming fut
     firsts = [info['dates'][o[12]] for o in info['objects'] if o[11] == 1 and len(o) > 13]
     r['first'] = di[min(firsts)] if firsts else 0
     r['biome'] = info.get('biome')
+
+# world state: in-game day, bosses, boss altars and traders found, ships and carts
+world_hist = json.load(open('data/history/world.json'))
+state = vworld.read_world_state('data/world')
+idx['day'] = int(state['net_time'] // 1200)
+idx['days'] = [world_hist['days'].get(d) for d in dates]
+BOSSES = [('defeated_eikthyr', 'Eikthyr', 'TrophyEikthyr', 'Eikthyrnir'),
+          ('defeated_gdking', 'The Elder', 'TrophyTheElder', 'GDKing'),
+          ('defeated_bonemass', 'Bonemass', 'TrophyBonemass', 'Bonemass'),
+          ('defeated_dragon', 'Moder', 'TrophyDragonQueen', 'Dragonqueen'),
+          ('defeated_goblinking', 'Yagluth', 'TrophyGoblinKing', 'GoblinKing'),
+          ('defeated_queen', 'The Queen', 'TrophySeekerQueen', 'Mistlands_DvergrBossEntrance1'),
+          ('defeated_fader', 'Fader', 'TrophyFader', 'FaderLocation')]
+TRADERS = {'Vendor_BlackForest': 'Haldor', 'Hildir_camp': 'Hildir', 'BogWitch_Camp': 'Bog Witch'}
+keys = set(state['global_keys'])
+idx['bosses'] = [dict(key=k, name=n, icon=f'assets/icons/{icon}.png',
+                      defeated=(di.get(world_hist['keys'].get(k), len(dates) - 1) if k in keys else None))
+                 for k, n, icon, _ in BOSSES]
+loc_kind = {vworld.stable_hash(loc): ('boss', i) for i, (_, _, _, loc) in enumerate(BOSSES)}
+loc_kind.update({vworld.stable_hash(k): ('trader', v) for k, v in TRADERS.items()})
+
+
+def zone_day(x, z):
+    return di.get(zones.get(f'{int((x + 32) // 64)},{int((z + 32) // 64)}'), 0)
+
+
+idx['locations'] = []
+for h, (x, y, z), placed in state['locations']:
+    if placed and h in loc_kind:
+        kind, what = loc_kind[h]
+        idx['locations'].append(dict(kind=kind, boss=what if kind == 'boss' else None, name=what if kind == 'trader' else BOSSES[what][1],
+                                     x=round(x), z=round(z), found=zone_day(x, z)))
+names = {int(k): v for k, v in json.load(open('data/prefab_names.json')).items()}
+VEHICLES = {'Raft': 'Raft', 'Karve': 'Karve', 'VikingShip': 'Longship', 'VikingShip_Ashlands': 'Drakkar', 'Cart': 'Cart'}
+idx['vehicles'] = [dict(kind=VEHICLES[names[zd.prefab]], x=round(zd.pos[0]), z=round(zd.pos[2]))
+                   for zd in vworld.read_zdos('data/world') if names.get(zd.prefab) in VEHICLES and zd.pos[1] < 1000]
+# players: sessions/deaths from the server log (also refreshed every few minutes by valheimdisplay-players.timer)
+try:
+    subprocess.run(py + ['tools/players.py'], check=True)
+except subprocess.CalledProcessError:
+    print('players: could not read the server log', file=sys.stderr)
+
 json.dump([[int(a), int(b), di.get(d, 0)] for k, d in zones.items() for a, b in [k.split(',')]],
           open('web/assets/zones.json', 'w'), separators=(',', ':'))
 json.dump(idx, open('web/assets/regions/index.json', 'w'), indent=1)
@@ -91,7 +134,7 @@ print('regions:', [r['slug'] for r in idx['regions']])
 # gzip the big data files once at build time; the web server sends these .gz copies
 import gzip, glob
 for f in glob.glob('web/assets/**/*', recursive=True):
-    if f.endswith(('.bin', '.json', '.glb')) and os.path.isfile(f):
+    if f.endswith(('.bin', '.json', '.glb')) and os.path.isfile(f) and not f.endswith('players.json'):
         gz = f + '.gz'
         if not os.path.exists(gz) or os.path.getmtime(gz) < os.path.getmtime(f):
             with open(f, 'rb') as src, gzip.open(gz, 'wb', compresslevel=9) as dst:

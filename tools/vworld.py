@@ -212,13 +212,14 @@ def read_zdos(folder: str):
             raise ValueError(f"{path}: {len(r.d) - r.p} trailing bytes")
 
 
-def read_generated_zones(folder: str):
-    """Zones the server has generated, i.e. everywhere a player has been nearby (from _main.N.db2)."""
+def read_world_state(folder: str):
+    """From _main.N.db2: game time, generated zones (everywhere a player has been nearby),
+    global keys (bosses beaten etc.) and the placed locations (boss altars, traders...)."""
     import gzip as _gz
     data = open(find_main(folder, "db2"), "rb").read()
     r = Reader(data)
     r.int()                       # version
-    r._u("<d", 8)                 # net time
+    net_time = r._u("<d", 8)
     n = r.int()
     raw = data[r.p:r.p + n]
     try:
@@ -227,5 +228,20 @@ def read_generated_zones(folder: str):
         import brotli  # type: ignore
         body = brotli.decompress(raw)
     z = Reader(body)
-    count = z.int()
-    return [(z.short(), z.short()) for _ in range(count)]
+    zones = [(z.short(), z.short()) for _ in range(z.int())]
+    state = dict(net_time=net_time, zones=zones, global_keys=[], locations=[])
+    try:
+        z.int()                   # location version
+        state['global_keys'] = [z.string() for _ in range(z.int())]
+        z.bool()                  # locations generated
+        for _ in range(z.int()):
+            h = z.int()
+            pos = (z.float(), z.float(), z.float())
+            state['locations'].append((h, pos, z.bool()))
+    except Exception:             # older/newer layouts: keep what we have
+        pass
+    return state
+
+
+def read_generated_zones(folder: str):
+    return read_world_state(folder)['zones']

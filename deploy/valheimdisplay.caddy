@@ -7,7 +7,7 @@ valheim.goku.host {
 	file_server {
 		precompressed gzip
 	}
-	@data path /assets/regions/* /assets/worldmap.png /assets/models.json
+	@data path /assets/regions/* /assets/worldmap.png /assets/worldmap_*.png /assets/zones.json /assets/models.json /assets/players.json
 	header @data Cache-Control "no-cache"
 	header X-Robots-Tag "noindex, nofollow"
 }

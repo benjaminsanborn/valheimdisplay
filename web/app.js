@@ -640,6 +640,7 @@ function applyDay() {
   }
   for (const f of region.fires?.items || []) f.on = visibleOn(f.o, d);
   refreshWeather();
+  updateWorldState();
   drawFog();
   updateTimelineUI();
 }
@@ -674,7 +675,8 @@ function fmtDate(iso) {
 function updateTimelineUI() {
   const n = index.dates.length, d = dayIdx ?? n - 1;
   $('day').value = d;
-  $('daylabel').textContent = fmtDate(index.dates[d]) + (d === n - 1 ? ' · today' : '');
+  const gd = index.days?.[d];
+  $('daylabel').textContent = fmtDate(index.dates[d]) + (gd != null ? ` · Day ${gd}` : '') + (d === n - 1 ? ' · latest' : '');
   document.querySelectorAll('.mk').forEach((m) => {
     const r = index.regions.find((x) => x.slug === m.dataset.slug);
     m.classList.toggle('future', r.first != null && r.first > d);
@@ -714,6 +716,83 @@ function cycleWeather() {
   if (weatherMode === 'auto') u.searchParams.delete('weather'); else u.searchParams.set('weather', weatherMode);
   history.replaceState(null, '', u);
   refreshWeather();
+}
+
+// ---------------------------------------------------------------- bosses, game day, players
+let players = null;
+const viewDay = () => dayIdx ?? (index.dates?.length ? index.dates.length - 1 : 0);
+const beaten = (b) => b.defeated != null && b.defeated <= viewDay();
+function gameDay() {
+  if (dayIdx == null || !index.days) return index.day;
+  return index.days[dayIdx] ?? index.day;
+}
+function updateWorldState() {
+  if (!index?.bosses) return;
+  const d = viewDay();
+  document.querySelectorAll('.poi').forEach((el) => {
+    el.classList.toggle('future', +(el.dataset.found || 0) > d);
+    if (el.dataset.boss != null) {
+      const b = index.bosses[+el.dataset.boss];
+      el.classList.toggle('alive', !beaten(b));
+      el.classList.toggle('beaten', beaten(b));
+      el.querySelector('span').textContent = `${b.name} \u00b7 ${beaten(b) ? 'defeated' : 'not yet defeated'}`;
+    }
+  });
+  renderHud();
+  if ($('panel').classList.contains('on')) renderPanel();
+}
+function renderHud() {
+  const hud = $('hud');
+  hud.style.display = '';
+  const n = index.bosses.filter(beaten).length;
+  const online = players?.online || [];
+  const latest = dayIdx == null || dayIdx === index.dates.length - 1;
+  hud.innerHTML = `<span class="day">Day ${gameDay()}</span>
+    <span class="trophies" title="${n} of ${index.bosses.length} bosses defeated">${index.bosses.map((b) =>
+      `<img src="${b.icon}" class="${beaten(b) ? '' : 'alive'}" title="${b.name}${beaten(b) ? ' \u2713' : ''}" alt="">`).join('')}</span>
+    ${players && latest ? `<span class="who"><span class="dot ${online.length ? 'on' : ''}"></span>${online.length
+      ? `<b>${online.map((o) => esc(o.name)).join(', ')}</b> online` : 'nobody online'}</span>` : ''}`;
+}
+const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function ago(iso) {
+  const m = (Date.now() - new Date(iso)) / 60000;
+  if (m < 60) return `${Math.max(1, Math.round(m))} min ago`;
+  if (m < 60 * 36) return `${Math.round(m / 60)} h ago`;
+  return `${Math.round(m / 1440)} days ago`;
+}
+function renderPanel() {
+  const P = $('panel');
+  const date = (i) => fmtDate(index.dates[i]);
+  let h = `<h3>Bosses \u00b7 ${index.bosses.filter(beaten).length} of ${index.bosses.length}</h3><div class="bosses">${index.bosses.map((b) =>
+    `<div class="boss ${beaten(b) ? '' : 'alive'}"><img src="${b.icon}" alt=""><b>${b.name}</b>${beaten(b)
+      ? `by ${date(b.defeated)}` : '\u2014'}</div>`).join('')}</div>`;
+  if (players) {
+    h += `<h3>Vikings</h3><table><tr><th>Name</th><th class="n">Hours</th><th class="n">Deaths</th><th class="n">Last seen</th></tr>${players.players.map((p) =>
+      `<tr><td><span class="dot ${p.online ? 'on' : ''}"></span>${esc(p.name)}</td><td class="n">${p.hours}</td><td class="n">${p.deaths}</td>
+       <td class="n">${p.online ? 'online now' : ago(p.last)}</td></tr>`).join('')}</table>`;
+    // hours played per day, last 30 days
+    const days = [];
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 86400000);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const by = players.days[key] || {};
+      days.push({ key, mins: Object.values(by).reduce((s, v) => s + v[0], 0), by });
+    }
+    const max = Math.max(60, ...days.map((d) => d.mins));
+    h += `<h3>Hours played, last 30 days</h3><div class="bars">${days.map((d) =>
+      `<div style="height:${(d.mins / max) * 100}%" title="${fmtDate(d.key)}: ${(d.mins / 60).toFixed(1)} h${Object.keys(d.by).length ? '\n' +
+        Object.entries(d.by).map(([n, v]) => `${n} ${(v[0] / 60).toFixed(1)} h${v[1] ? `, ${v[1]} death${v[1] > 1 ? 's' : ''}` : ''}`).join('\n') : ''}"></div>`).join('')}</div>
+      <div class="axis"><span>${fmtDate(days[0].key)}</span><span>today</span></div>
+      <div class="note">From the server log since ${fmtDate(players.players.reduce((a, p) => (p.first < a ? p.first : a), '9').slice(0, 10))}. Crossplay disconnects don't name the player, so hours are approximate.</div>`;
+  }
+  P.innerHTML = h;
+}
+async function loadPlayers() {
+  try {
+    players = await fetch('assets/players.json', { cache: 'no-cache' }).then((r) => (r.ok ? r.json() : null));
+  } catch { players = null; }
+  if (index) renderHud();
+  if ($('panel').classList.contains('on')) renderPanel();
 }
 
 let playTimer = null;
@@ -960,6 +1039,10 @@ function toggleGlobe(force) {
   setTimeout(layoutGlobe, 320);
 }
 
+function placePoi(el, p) {
+  el.style.left = `${((p.x + index.radius) / (2 * index.radius)) * 100}%`;
+  el.style.top = `${((index.radius - p.z) / (2 * index.radius)) * 100}%`;
+}
 function buildGlobe() {
   const mk = $('markers');
   if (index.dates && index.dates.length > 1) {
@@ -990,6 +1073,23 @@ function buildGlobe() {
     };
     mk.appendChild(el);
   }
+  for (const L of index.locations || []) {
+    const el = document.createElement('div');
+    const boss = L.kind === 'boss' ? index.bosses[L.boss] : null;
+    el.className = 'poi ' + L.kind;
+    el.dataset.found = L.found;
+    if (boss) el.dataset.boss = L.boss;
+    el.innerHTML = boss ? `<i><img src="${boss.icon}" alt=""></i><span></span>` : `<i>\u2696</i><span>${L.name}</span>`;
+    placePoi(el, L);
+    mk.appendChild(el);
+  }
+  for (const v of index.vehicles || []) {
+    const el = document.createElement('div');
+    el.className = 'poi vehicle';
+    el.innerHTML = `<i>${v.kind === 'Cart' ? '\u{1F6D2}' : '\u26F5'}</i><span>${v.kind}</span>`;
+    placePoi(el, v);
+    mk.appendChild(el);
+  }
   new ResizeObserver(() => layoutGlobe()).observe($('disc'));
   $('disc').onclick = () => toggleGlobe();
   $('backdrop').onclick = () => toggleGlobe(false);
@@ -1015,6 +1115,16 @@ async function init() {
     applyNight();
   };
   $('weather').onclick = cycleWeather;
+  $('hud').onclick = (e) => {
+    e.stopPropagation();
+    const on = $('panel').classList.toggle('on');
+    if (on) renderPanel();
+  };
+  $('panel').onclick = (e) => e.stopPropagation();
+  window.addEventListener('pointerdown', (e) => { if (!$('panel').contains(e.target) && !$('hud').contains(e.target)) $('panel').classList.remove('on'); });
+  updateWorldState();
+  loadPlayers();
+  setInterval(loadPlayers, 60000);
   applyNight();
   const q = new URLSearchParams(location.search).get('place');
   setPlace(index.regions.some((r) => r.slug === q) ? q : index.regions[0].slug);
