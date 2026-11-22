@@ -144,16 +144,16 @@ function cloudTexture() {
   return t;
 }
 
-export function createWeather(scene, nightU) {
+export function createWeather(scene, nightU, scale = 1) {
   const group = new THREE.Group();
   scene.add(group);
   const dpr = () => Math.min(window.devicePixelRatio, 2);
   const L = {
-    rain: layer({ n: 14000, lines: true, color: [0.72, 0.78, 0.86], opacity: 0.42, dim: 0.3, nightU }),
-    snow: layer({ n: 11000, color: [1, 1, 1], opacity: 0.95, size: 0.18, minPx: 3.2, wobble: 0.7, dim: 0.3, nightU }),
-    ash: layer({ n: 9000, color: [0.22, 0.2, 0.2], opacity: 0.9, size: 0.15, minPx: 2.8, wobble: 0.9, dim: 0.6, nightU }),
-    embers: layer({ n: 2200, color: [1, 0.45, 0.12], opacity: 1, size: 0.12, minPx: 3, wobble: 1.3, flicker: 1, additive: true, nightU }),
-    motes: layer({ n: 900, color: [1, 1, 1], opacity: 0.75, size: 0.07, minPx: 1.8, wobble: 1.6, flicker: 0.3, dim: 0.25, nightU }),
+    rain: layer({ n: Math.round(14000 * scale), lines: true, color: [0.72, 0.78, 0.86], opacity: 0.42, dim: 0.3, nightU }),
+    snow: layer({ n: Math.round(11000 * scale), color: [1, 1, 1], opacity: 0.95, size: 0.18, minPx: 3.2, wobble: 0.7, dim: 0.3, nightU }),
+    ash: layer({ n: Math.round(9000 * scale), color: [0.22, 0.2, 0.2], opacity: 0.9, size: 0.15, minPx: 2.8, wobble: 0.9, dim: 0.6, nightU }),
+    embers: layer({ n: Math.round(2200 * scale), color: [1, 0.45, 0.12], opacity: 1, size: 0.12, minPx: 3, wobble: 1.3, flicker: 1, additive: true, nightU }),
+    motes: layer({ n: Math.round(900 * scale), color: [1, 1, 1], opacity: 0.75, size: 0.07, minPx: 1.8, wobble: 1.6, flicker: 0.3, dim: 0.25, nightU }),
   };
   Object.values(L).forEach((o) => group.add(o));
 
@@ -170,7 +170,7 @@ export function createWeather(scene, nightU) {
     mist.tex = mist.tex || cloudTexture();
     mist.bounds = { x0: T.cx - T.W / 2, z0: T.cz - T.D / 2, W: T.W, D: T.D };
     const mat = new THREE.SpriteMaterial({ map: mist.tex, transparent: true, depthWrite: false, fog: false });
-    for (let i = 0; i < 70; i++) {
+    for (let i = 0; i < Math.round(70 * scale); i++) {
       const s = new THREE.Sprite(mat.clone());
       const x = mist.bounds.x0 + Math.random() * T.W, z = mist.bounds.z0 + Math.random() * T.D;
       s.position.set(x, 0, z);

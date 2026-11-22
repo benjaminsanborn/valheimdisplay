@@ -13,13 +13,20 @@ const LAYER_TINT = [
 ];
 // grass colours (sRGB) per terrain layer that grows grass: meadows, forest, swamp, plains
 const GRASS = { 0: [0.4, 0.55, 0.21], 1: [0.3, 0.4, 0.17], 2: [0.38, 0.36, 0.2], 3: [0.72, 0.66, 0.32] };
+const GRASS_SCALE = matchMedia('(pointer: coarse)').matches ? 0.55 : 1;
 const GRASS_DENSITY = { 0: 2.6, 1: 0.5, 2: 0.6, 3: 2.4 };
 
 // ---------------------------------------------------------------- renderer & scene
-const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// phones and tablets: fewer pixels, frames and grass blades, so they don't run hot
+const MOBILE = matchMedia('(pointer: coarse)').matches;
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: MOBILE ? 'low-power' : 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, MOBILE ? 1.5 : 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
+// the sun never moves within a place, so the shadow map is drawn only when something changes
+// (place, sun, timeline) instead of re-rendering every model into it each frame
+renderer.shadowMap.autoUpdate = false;
+const redrawShadows = () => { renderer.shadowMap.needsUpdate = true; };
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -31,7 +38,7 @@ scene.background = new THREE.Color(0x1b1915);
 const hemi = new THREE.HemisphereLight(0xcfe3ff, 0x5a4a32, 1.1);
 const sun = new THREE.DirectionalLight(0xfff1d6, 2.6);
 sun.castShadow = true;
-sun.shadow.mapSize.set(4096, 4096);
+sun.shadow.mapSize.set(MOBILE ? 2048 : 4096, MOBILE ? 2048 : 4096);
 sun.shadow.bias = -0.0004;
 sun.shadow.normalBias = 0.6;
 scene.add(hemi, sun, sun.target);
@@ -59,7 +66,7 @@ const timeUniform = { value: 0 };
 const nightUniform = { value: 0 };
 const overcastUniform = { value: 0 };
 const windUniform = { value: 1 };
-const weather = createWeather(scene, nightUniform);
+const weather = createWeather(scene, nightUniform, MOBILE ? 0.5 : 1);
 // 'auto' = picked for the place's biome and the day; or a WEATHER key; or 'off'
 let weatherMode = new URLSearchParams(location.search).get('weather') || 'auto';
 const texLoader = new THREE.TextureLoader();
@@ -414,7 +421,7 @@ function buildGrass(info, T) {
       const wsum = (T.weights[k * 12] + T.weights[k * 12 + 1] + T.weights[k * 12 + 2] + T.weights[k * 12 + 3]) / 255;
       if (wsum < 0.05) continue;
       dens *= Math.max(0.2, Math.min(1, 1 - (distTo(i, j) - 50) / 120));
-      const count = Math.floor(dens + rnd());
+      const count = Math.floor(dens * GRASS_SCALE + rnd());
       const vv = T.variation[k] / 255;
       for (let c = 0; c < count; c++) {
         const x = x0 + i + rnd(), z = -(z0 + j + rnd());
@@ -497,6 +504,7 @@ async function buildObjects(info, onProgress) {
     if (!parts) return;
     for (const part of parts) {
       const im = new THREE.InstancedMesh(part.geometry, part.material, items.length);
+      im.name = info.models[mi];
       items.forEach((o, k) => {
         im.setMatrixAt(k, m4.compose(p.set(o[1], o[2], o[3]), q.set(o[4], o[5], o[6], o[7]), s.set(o[8], o[9], o[10])));
       });
@@ -530,6 +538,7 @@ function placeSun() {
   const sc = sun.shadow.camera, h = r * 0.75;
   sc.left = -h; sc.right = h; sc.top = h; sc.bottom = -h; sc.near = 1; sc.far = r * 4;
   sc.updateProjectionMatrix();
+  redrawShadows();
 }
 
 function resetView(zoom) {
@@ -599,6 +608,7 @@ async function loadRegion(slug, arrive) {
 
   const lbl = $('labels');
   lbl.innerHTML = '';
+  labelKey = '';
   labelEls = info.labels.map((L) => {
     const el = document.createElement('div');
     const portal = L.kind.startsWith('portal');
@@ -638,6 +648,7 @@ function applyDay() {
     });
     im.instanceMatrix.needsUpdate = true;
   }
+  redrawShadows();
   for (const f of region.fires?.items || []) f.on = visibleOn(f.o, d);
   refreshWeather();
   updateWorldState();
@@ -1140,8 +1151,16 @@ window.addEventListener('resize', () => {
   if (index) layoutGlobe();
 });
 
-function loop() {
+// frame budget: 30 fps on phones, and slower still once nobody has touched the view for a while
+let lastInput = performance.now(), lastFrame = 0, labelKey = '';
+for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'touchstart'])
+  window.addEventListener(ev, () => { lastInput = performance.now(); }, { passive: true });
+function loop(now) {
   requestAnimationFrame(loop);
+  const idle = now - lastInput > 30000;
+  const fps = idle ? 15 : MOBILE ? 30 : 60;
+  if (now - lastFrame < 1000 / fps - 2) return;
+  lastFrame = now;
   const dt = Math.min(clock.getDelta(), 0.1);
   timeUniform.value = clock.elapsedTime;
   animateFires(timeUniform.value);
@@ -1149,9 +1168,11 @@ function loop() {
   if (weather.state.p.lightning) applyLighting();
   controls.update();
   renderer.render(scene, camera);
-  updateLabels();
+  // labels only move when the camera, timeline or globe does
+  const key = camera.matrixWorld.elements.join() + camera.zoom + regionDay() + document.body.className + innerWidth + innerHeight;
+  if (key !== labelKey) { labelKey = key; updateLabels(); }
 }
 setFrustum();
 init();
-loop();
+requestAnimationFrame(loop);
 window.__viewerReady = () => $('loading').style.display === 'none';
