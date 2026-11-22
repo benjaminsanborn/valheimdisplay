@@ -7,7 +7,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=%h/valheimdisplay
-ExecStart=%h/.local/bin/uv run --frozen python tools/valheimdisplay.py --bind 127.0.0.1
+ExecStart=%h/.local/bin/uv run --frozen --no-dev python tools/valheimdisplay.py --bind 127.0.0.1
 Restart=on-failure
 RestartSec=30
 IOSchedulingClass=idle
