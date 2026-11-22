@@ -3,3 +3,5 @@ data/
 web/assets/
 .venv/
 __pycache__/
+/dist/
+/build/

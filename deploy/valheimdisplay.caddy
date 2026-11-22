@@ -1,13 +1,8 @@
 # Valheim world viewer -> /etc/caddy/sites/valheimdisplay.caddy (imported by /etc/caddy/Caddyfile)
 # HTTPS certificate is automatic. Public, but asks search engines not to index it.
+# The viewer serves itself (deploy/valheimdisplay.service, 127.0.0.1:8080), including gzipped data and cache headers.
 valheim.goku.host {
-	root * /var/www/valheimdisplay
-	# data files are gzipped at build time (tools/build.py); everything else is compressed on the fly
 	encode zstd gzip
-	file_server {
-		precompressed gzip
-	}
-	@data path /assets/regions/* /assets/worldmap.png /assets/worldmap_*.png /assets/zones.json /assets/models.json /assets/players.json
-	header @data Cache-Control "no-cache"
+	reverse_proxy 127.0.0.1:8080
 	header X-Robots-Tag "noindex, nofollow"
 }

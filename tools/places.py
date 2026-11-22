@@ -17,6 +17,7 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(__file__))
 import vworld
+from common import enter_home
 from vworld import stable_hash
 
 LINK, MIN_PIECES, MERGE, MIN_R, MAX_R, MARGIN = 40.0, 15, 150.0, 60.0, 160.0, 45.0
@@ -126,7 +127,7 @@ def build_places(world='data/world', names_path='data/prefab_names.json', overri
 
 
 if __name__ == '__main__':
-    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    enter_home()
     places = build_places()
     json.dump(places, open('data/places.json', 'w'), indent=1)
     for p in places:

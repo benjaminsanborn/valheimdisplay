@@ -2,14 +2,14 @@
 
 usage: build.py [--models-only] [slug ...]
 """
-import json, os, subprocess, sys
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-os.chdir(ROOT)
-sys.path.insert(0, 'tools')
+import json, os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import enter_home, run_tool
+import subprocess
+enter_home()
 import vworld
 
 from places import build_places
-py = [sys.executable]
 GAME = os.environ.get('VALHEIM_GAME_DATA', 'data/game/gamedata')  # the server's valheim_server_Data folder
 os.makedirs('web/assets/regions', exist_ok=True)
 # prefab hash -> name table, regenerated when the game updates
@@ -17,8 +17,8 @@ names_json = 'data/prefab_names.json'
 newest_game_file = max(os.path.getmtime(os.path.join(dp, f)) for dp, _, fs in os.walk(GAME) for f in fs)
 if not os.path.exists(names_json) or os.path.getmtime(names_json) < newest_game_file:
     print('indexing prefab names...', flush=True)
-    subprocess.run(py + ['tools/prefab_names.py', GAME, names_json], check=True)
-subprocess.run(py + ['tools/history.py', 'add', 'data/world'], check=True)   # timelapse history
+    run_tool('prefab_names', GAME, names_json)
+run_tool('history', 'add', 'data/world')   # timelapse history
 regions = build_places()   # which places to render: see tools/places.py for the rule
 json.dump(regions, open('data/places.json', 'w'), indent=1)
 only = [a for a in sys.argv[1:] if not a.startswith('--')]
@@ -26,10 +26,9 @@ if '--models-only' not in sys.argv:
     for r in regions:
         if only and r['slug'] not in only:
             continue
-        subprocess.run(py + ['tools/export_region.py', 'data/world', 'web/assets', r['slug'], r['title'],
-                             str(r['x']), str(r['z']), str(r.get('radius', 120))], check=True)
+        run_tool('export_region', 'data/world', 'web/assets', r['slug'], r['title'], r['x'], r['z'], r.get('radius', 120))
 if not os.path.exists('web/assets/terrain/layer0.jpg'):
-    subprocess.run(py + ['tools/export_terrain_textures.py', GAME, 'web/assets/terrain'], check=True)
+    run_tool('export_terrain_textures', GAME, 'web/assets/terrain')
 manifest = json.load(open('web/assets/models.json')) if os.path.exists('web/assets/models.json') else {}
 need = [n for n in open('web/assets/needed_models.txt').read().split() if n not in manifest]
 skip = set(open('data/no_model.txt').read().split()) if os.path.exists('data/no_model.txt') else set()
@@ -37,11 +36,11 @@ need = [n for n in need if n not in skip]
 if need:
     open('data/todo_models.txt', 'w').write('\n'.join(need))
     print(f'exporting {len(need)} models...', flush=True)
-    subprocess.run(py + ['tools/export_models.py', GAME, 'web/assets', '--list', 'data/todo_models.txt'], check=True)
+    run_tool('export_models', GAME, 'web/assets', '--list', 'data/todo_models.txt')
     manifest = json.load(open('web/assets/models.json'))
     open('data/no_model.txt', 'a').write(''.join(n + '\n' for n in need if n not in manifest))
-subprocess.run(py + ['tools/export_icons.py', GAME, 'web/assets/icons'], check=True)
-subprocess.run(py + ['tools/export_worldmap.py', 'data/world', 'web/assets/worldmap.png', '1024'], check=True)
+run_tool('export_icons', GAME, 'web/assets/icons')
+run_tool('export_worldmap', 'data/world', 'web/assets/worldmap.png', 1024)
 
 # link portals: each portal label gets the place + spot its partner (same tag) is in
 portals = []
@@ -122,7 +121,7 @@ idx['vehicles'] = [dict(kind=VEHICLES[names[zd.prefab]], x=round(zd.pos[0]), z=r
                    for zd in vworld.read_zdos('data/world') if names.get(zd.prefab) in VEHICLES and zd.pos[1] < 1000]
 # players: sessions/deaths from the server log (also refreshed every few minutes by valheimdisplay-players.timer)
 try:
-    subprocess.run(py + ['tools/players.py'], check=True)
+    run_tool('players')
 except subprocess.CalledProcessError:
     print('players: could not read the server log', file=sys.stderr)
 

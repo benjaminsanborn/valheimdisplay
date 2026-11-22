@@ -2,9 +2,13 @@
 
   players.py [--publish DIR]
 
-Reads the valheim.service journal (over ssh when VALHEIM_SSH is set, like update.sh), keeps the lines
-that matter in data/history/serverlog.txt (so history survives journal rotation), and writes
-web/assets/players.json (and DIR/assets/players.json with --publish).
+Where the log comes from (VALHEIM_SERVER_LOG):
+  journal:<unit>   the systemd journal of that service (over ssh when VALHEIM_SSH is set)
+  <path>           a log file the server writes (-logFile, or its console output redirected)
+  none / empty     no player stats
+The lines that matter are kept in data/history/serverlog.txt (so history survives log rotation and
+server restarts that overwrite the log file), and web/assets/players.json is written from them
+(also DIR/assets/players.json with --publish).
 
 How the log is read:
   - "Got handshake from client X" then "Got character ZDOID from NAME : uid:1" = NAME joined
@@ -23,32 +27,82 @@ import subprocess
 import sys
 from collections import defaultdict
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import enter_home
+
 LOG = 'data/history/serverlog.txt'
+POS = 'data/history/serverlog.pos.json'
 OUT = 'web/assets/players.json'
 KEEP = re.compile(r'Got handshake from client|Got character ZDOID from|Closing socket|Player connection lost|'
-                  r'Player joined server|systemd\[1\]: (Started|Stopping) valheim')
+                  r'Player joined server')
+STAMP = re.compile(r'(\d\d/\d\d/\d{4} \d\d:\d\d:\d\d): (.*)')   # Valheim's own timestamp on each line
+ENGINE_START = 'Initialize engine version'                    # first line of every server start
 MAX_SESSION = dt.timedelta(hours=16)   # a session with a missing disconnect (log gap) shouldn't count forever
 
 
-def fetch():
-    """New relevant journal lines, as 'ISO-time<TAB>message'."""
-    known = set(open(LOG).read().splitlines()) if os.path.exists(LOG) else set()
-    since = max((l.split('\t')[0] for l in known), default=None)
-    cmd = ['journalctl', '-u', 'valheim.service', '-o', 'short-iso', '--no-pager']
+def source():
+    return os.environ.get('VALHEIM_SERVER_LOG', 'journal:valheim.service').strip()
+
+
+def journal_rows(unit, since):
+    cmd = ['journalctl', '-u', unit, '-o', 'short-iso', '--no-pager']
     if since:
         cmd += ['--since', since[:19].replace('T', ' ')]
-    host = os.environ.get('VALHEIM_SSH', 'ubuntu')
+    host = os.environ.get('VALHEIM_SSH', '')
     if host:
         cmd = ['ssh', host, ' '.join(f"'{c}'" for c in cmd)]
     out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
-    new = []
+    service = re.compile(r'systemd\[1\]: (Started|Stopping) ' + re.escape(unit.removesuffix('.service')))
     for line in out.splitlines():
-        if not KEEP.search(line):
-            continue
         t, _, rest = line.partition(' ')
-        msg = re.sub(r'^\S+ [^:]+: (\d\d/\d\d/\d{4} [\d:]+: )?', '', rest)
-        if 'systemd[1]' in rest:
-            msg = 'SERVICE ' + ('start' if 'Started' in rest else 'stop')
+        if service.search(rest):
+            yield t, 'SERVICE ' + ('start' if 'Started' in rest else 'stop')
+        elif KEEP.search(rest):
+            yield t, re.sub(r'^\S+ [^:]+: (\d\d/\d\d/\d{4} [\d:]+: )?', '', rest)
+
+
+def file_rows(path):
+    """New lines of a log file since last time. A restarted server usually starts the file over."""
+    if not os.path.exists(path):
+        print(f'players: no log file at {path}', file=sys.stderr)
+        return
+    pos = json.load(open(POS)) if os.path.exists(POS) else {}
+    with open(path, 'rb') as f:
+        head = f.read(256).hex()
+        size = os.fstat(f.fileno()).st_size
+        off = pos.get('offset', 0) if pos.get('path') == path and pos.get('head') == head and size >= pos.get('offset', 0) else 0
+        f.seek(off)
+        data = f.read()
+    data = data[:data.rfind(b'\n') + 1]          # a line still being written waits for next time
+    started = False
+    for line in data.decode('utf-8', 'replace').splitlines():
+        if ENGINE_START in line:
+            started = True
+            continue
+        m = STAMP.search(line)
+        if not m:
+            continue
+        t = dt.datetime.strptime(m[1], '%m/%d/%Y %H:%M:%S').astimezone().isoformat()
+        if started:
+            yield t, 'SERVICE start'
+            started = False
+        if KEEP.search(m[2]):
+            yield t, m[2]
+    json.dump(dict(path=path, head=head, offset=off + len(data)), open(POS, 'w'))
+
+
+def fetch():
+    """Every kept log line so far, as 'ISO-time<TAB>message', sorted."""
+    known = set(open(LOG).read().splitlines()) if os.path.exists(LOG) else set()
+    src = source()
+    if src.lower() in ('', 'none', 'off'):
+        rows = []
+    elif src.startswith('journal:'):
+        rows = journal_rows(src.split(':', 1)[1], max((l.split('\t')[0] for l in known), default=None))
+    else:
+        rows = file_rows(src)
+    new = []
+    for t, msg in rows:
         row = f'{t}\t{msg}'
         if row not in known:
             known.add(row)
@@ -99,7 +153,12 @@ def parse(rows):
         t = dt.datetime.fromisoformat(ts)
         if msg.startswith('SERVICE'):
             for n in list(online):
-                end_at_loss(n, t) if losses else end(n, t)
+                if losses:
+                    end_at_loss(n, t)
+                elif msg == 'SERVICE start':   # no stop was logged (a crash, or a log file): end at their last sign of life
+                    end(n, online[n]['last'])
+                else:
+                    end(n, t)
             losses.clear(); pending.clear()
         elif m := re.match(r'Got handshake from client (\S+)', msg):
             name = sock.get(m[1])
@@ -181,7 +240,7 @@ def summarise(online, sessions, deaths, now):
 
 
 def main():
-    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    enter_home()
     rows = fetch()
     online, sessions, deaths = parse(rows)
     data = summarise(online, sessions, deaths, dt.datetime.now().astimezone())

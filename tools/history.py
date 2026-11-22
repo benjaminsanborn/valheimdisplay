@@ -20,6 +20,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(__file__))
 import vworld
+from common import enter_home
 from vworld import stable_hash
 
 HIST = 'data/history'
@@ -87,7 +88,7 @@ def add(world, built, zones, names):
 
 
 def main():
-    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    enter_home()
     names = {int(k): v for k, v in json.load(open('data/prefab_names.json')).items()}
     built, zones = load()
     cmd, args = sys.argv[1], sys.argv[2:]
