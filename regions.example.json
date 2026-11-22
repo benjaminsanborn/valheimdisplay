@@ -1,0 +1,4 @@
+[
+  {"slug": "main", "title": "Main base", "x": 705, "z": -113, "radius": 150},
+  {"slug": "farm", "title": "Farm", "x": 3000, "z": -3974, "radius": 110}
+]

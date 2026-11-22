@@ -1,7 +1,7 @@
 [project]
 name = "valheimdisplay"
-version = "0.1.0"
-description = "Isometric 3D web viewer for a Valheim dedicated server's world"
+version = "0.2.0"
+description = "A 3D website of your Valheim server's world, kept up to date as the server saves"
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.5.5",

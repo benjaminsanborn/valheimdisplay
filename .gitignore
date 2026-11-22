@@ -5,3 +5,5 @@ web/assets/
 __pycache__/
 /dist/
 /build/
+/regions.json
+/valheimdisplay.toml

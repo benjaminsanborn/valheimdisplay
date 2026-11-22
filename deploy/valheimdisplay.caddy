@@ -1,8 +1,9 @@
-# Valheim world viewer -> /etc/caddy/sites/valheimdisplay.caddy (imported by /etc/caddy/Caddyfile)
-# HTTPS certificate is automatic. Public, but asks search engines not to index it.
-# The viewer serves itself (deploy/valheimdisplay.service, 127.0.0.1:8080), including gzipped data and cache headers.
-valheim.goku.host {
+# Example: serve the viewer on your own domain with HTTPS (the certificate is automatic).
+# Install as /etc/caddy/sites/valheimdisplay.caddy (or paste into your Caddyfile), replace the
+# domain, and run the viewer with --bind 127.0.0.1 so only Caddy can reach it.
+valheim.example.com {
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:8080
+	# public, but asks search engines not to index it
 	header X-Robots-Tag "noindex, nofollow"
 }
