@@ -722,6 +722,9 @@ function cycleWeather() {
 let players = null;
 const viewDay = () => dayIdx ?? (index.dates?.length ? index.dates.length - 1 : 0);
 const beaten = (b) => b.defeated != null && b.defeated <= viewDay();
+// a boss shows once its altar has been found (or it has been beaten); undiscovered ones stay a surprise
+const known = (b) => beaten(b) || (index.locations || []).some((L) =>
+  L.kind === 'boss' && index.bosses[L.boss] === b && L.found <= viewDay());
 function gameDay() {
   if (dayIdx == null || !index.days) return index.day;
   return index.days[dayIdx] ?? index.day;
@@ -745,10 +748,11 @@ function renderHud() {
   const hud = $('hud');
   hud.style.display = '';
   const n = index.bosses.filter(beaten).length;
+  const shown = index.bosses.filter(known);
   const online = players?.online || [];
   const latest = dayIdx == null || dayIdx === index.dates.length - 1;
   hud.innerHTML = `<span class="day">Day ${gameDay()}</span>
-    <span class="trophies" title="${n} of ${index.bosses.length} bosses defeated">${index.bosses.map((b) =>
+    <span class="trophies" title="${n} boss${n === 1 ? '' : 'es'} defeated">${shown.map((b) =>
       `<img src="${b.icon}" class="${beaten(b) ? '' : 'alive'}" title="${b.name}${beaten(b) ? ' \u2713' : ''}" alt="">`).join('')}</span>
     ${players && latest ? `<span class="who"><span class="dot ${online.length ? 'on' : ''}"></span>${online.length
       ? `<b>${online.map((o) => esc(o.name)).join(', ')}</b> online` : 'nobody online'}</span>` : ''}`;
@@ -763,9 +767,9 @@ function ago(iso) {
 function renderPanel() {
   const P = $('panel');
   const date = (i) => fmtDate(index.dates[i]);
-  let h = `<h3>Bosses \u00b7 ${index.bosses.filter(beaten).length} of ${index.bosses.length}</h3><div class="bosses">${index.bosses.map((b) =>
+  let h = `<h3>Bosses \u00b7 ${index.bosses.filter(beaten).length} defeated</h3><div class="bosses">${index.bosses.filter(known).map((b) =>
     `<div class="boss ${beaten(b) ? '' : 'alive'}"><img src="${b.icon}" alt=""><b>${b.name}</b>${beaten(b)
-      ? `by ${date(b.defeated)}` : '\u2014'}</div>`).join('')}</div>`;
+      ? `by ${date(b.defeated)}` : 'altar found'}</div>`).join('')}</div>`;
   if (players) {
     h += `<h3>Vikings</h3><table><tr><th>Name</th><th class="n">Hours</th><th class="n">Deaths</th><th class="n">Last seen</th></tr>${players.players.map((p) =>
       `<tr><td><span class="dot ${p.online ? 'on' : ''}"></span>${esc(p.name)}</td><td class="n">${p.hours}</td><td class="n">${p.deaths}</td>
