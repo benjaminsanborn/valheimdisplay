@@ -12,7 +12,7 @@ machine. Nothing from the game is shipped with it.
 ## Running it next to your server
 
 1. Download the program for your system from the [releases page](../../releases)
-   (`valheimdisplay-windows-x64.exe`, `-linux-x64`, `-linux-arm64`, `-macos-arm64`, `-macos-x64`).
+   (`valheimdisplay-windows-x64.exe`, `-linux-x64`, `-linux-arm64`, `-macos-arm64`; Intel Macs can run it from source or Docker).
 2. Put it on the machine that runs the Valheim server and start it:
    - Windows: double-click it (Windows may warn that it's from an unknown publisher: *More info → Run anyway*).
    - Linux / macOS: `chmod +x valheimdisplay-* && ./valheimdisplay-linux-x64`
