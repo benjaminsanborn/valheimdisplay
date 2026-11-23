@@ -41,6 +41,7 @@ if need:
     open('data/no_model.txt', 'a').write(''.join(n + '\n' for n in need if n not in manifest))
 run_tool('export_icons', GAME, 'web/assets/icons')
 run_tool('export_worldmap', 'data/world', 'web/assets/worldmap.png', 1024)
+run_tool('export_worldmap', 'data/world', 'web/assets/worldmap_hi.webp', 4096)   # loaded when the big map opens
 
 # link portals: each portal label gets the place + spot its partner (same tag) is in
 portals = []
@@ -117,8 +118,25 @@ for h, (x, y, z), placed in state['locations']:
                                      x=round(x), z=round(z), found=zone_day(x, z)))
 names = {int(k): v for k, v in json.load(open('data/prefab_names.json')).items()}
 VEHICLES = {'Raft': 'Raft', 'Karve': 'Karve', 'VikingShip': 'Longship', 'VikingShip_Ashlands': 'Drakkar', 'Cart': 'Cart'}
-idx['vehicles'] = [dict(kind=VEHICLES[names[zd.prefab]], x=round(zd.pos[0]), z=round(zd.pos[2]))
-                   for zd in vworld.read_zdos('data/world') if names.get(zd.prefab) in VEHICLES and zd.pos[1] < 1000]
+# players' beds and their unlooted graves: the world save doesn't keep where players are, but these name their owner.
+# Both are today's state only, so the map shows them on the latest day of the timeline.
+OWNER, DIED = vworld.stable_hash('ownerName'), vworld.stable_hash('timeOfDeath')
+idx['vehicles'], idx['beds'], idx['graves'] = [], [], []
+for zd in vworld.read_zdos('data/world'):
+    kind, owner = names.get(zd.prefab), zd.strings.get(OWNER)
+    x, z = round(zd.pos[0]), round(zd.pos[2])
+    if kind in VEHICLES and zd.pos[1] < 1000:
+        idx['vehicles'].append(dict(kind=VEHICLES[kind], x=x, z=z))
+    elif kind in ('bed', 'piece_bed02') and owner:
+        # one marker per base, naming everyone who sleeps there
+        near = next((b for b in idx['beds'] if abs(b['x'] - x) < 150 and abs(b['z'] - z) < 150), None)
+        if not near:
+            idx['beds'].append(dict(names=[owner], x=x, z=z, found=len(dates) - 1))
+        elif owner not in near['names']:
+            near['names'].append(owner)
+    elif kind == 'Player_tombstone' and owner:
+        died = zd.longs.get(DIED)   # game time in 100 ns ticks
+        idx['graves'].append(dict(name=owner, x=x, z=z, day=int(died / 1e7 // 1200) if died else None, found=len(dates) - 1))
 # players: sessions/deaths from the server log (also refreshed every few minutes by valheimdisplay-players.timer)
 try:
     run_tool('players')

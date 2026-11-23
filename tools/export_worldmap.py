@@ -1,6 +1,6 @@
 """Render a round world map (biomes + hill shading) with unexplored areas fogged.
 
-usage: export_worldmap.py <world dir> <out png> [size]
+usage: export_worldmap.py <world dir> <out .png or .webp> [size]
 Explored = zones the server has generated (players have been nearby).
 """
 import os, sys
@@ -66,12 +66,16 @@ alpha = np.clip((R - r) / (px * 1.5), 0, 1)
 def write(path, pixels):
     pixels = pixels.copy()
     pixels[r > R] = (0, 0, 0)
-    Image.fromarray(np.dstack([np.clip(pixels, 0, 255), alpha * 255]).astype(np.uint8), 'RGBA').save(path, optimize=True)
+    im = Image.fromarray(np.dstack([np.clip(pixels, 0, 255), alpha * 255]).astype(np.uint8), 'RGBA')
+    if path.endswith('.webp'):
+        im.save(path, 'WEBP', quality=80, method=6)
+    else:
+        im.save(path, optimize=True)
 
 
 write(out, img * e + fog * (1 - e))            # today's map, fog of war baked in
 # for the timelapse the browser draws the fog itself: an unfogged map plus an all-fog layer
-base = out[:-4] if out.endswith('.png') else out
-write(base + '_color.png', img)
-write(base + '_fog.png', fog * np.ones_like(img))
+base, ext = os.path.splitext(out)
+write(base + '_color' + ext, img)
+write(base + '_fog' + ext, fog * np.ones_like(img))
 print(f'world map {N}px, {len(zones)} explored zones -> {out}')

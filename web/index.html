@@ -97,7 +97,15 @@
   .poi:hover { z-index: 4; }
   body.big .poi i { width: 28px; height: 28px; font-size: 15px; box-shadow: 0 2px 6px rgba(0,0,0,.6); }
   body.big #hud, body.big #panel { display: none; }
-  body.big .poi span { bottom: 30px; font-size: 13px; }
+  body.big .poi span { bottom: 30px; font-size: 13px; display: block; }
+  body.big .poi.hide span { display: none; }
+  body.big .poi.hide:hover span, body.big .poi.pin span { display: block; }
+  body.big .poi { cursor: pointer; }
+  .poi.pin { z-index: 4; }
+  .poi.bed i { background: rgba(60,40,25,.85); }
+  .poi.grave i { background: rgba(70,25,25,.9); border-color: rgba(255,140,120,.7); color: #ffd2c8; }
+  body.big .poi.bed i { width: 22px; height: 22px; font-size: 12px; }
+  body.big .poi.bed span { bottom: 24px; }
   .poi.future { display: none; }
 
   /* ---- status bar: game day, bosses, who's online ---- */
@@ -159,7 +167,7 @@
 <div id="panel"></div>
 <button id="night" title="Night">&#9790;</button>
 <button id="weather" title="Weather">&#9729;&#xFE0E;</button>
-<div id="hint">Pick a place · pinch or scroll to zoom · grey areas are still unexplored</div>
+<div id="hint">Pick a place · pinch or double-tap to zoom</div>
 <div id="flash"></div>
 <div id="loading">Loading…</div>
 <script type="module" src="app.js"></script>

@@ -22,3 +22,9 @@ the game server, and [Caddy](https://caddyserver.com) serves it on a domain with
 
 The viewer sends its own cache headers and pre-compressed files, so the proxy only needs to pass
 requests through.
+
+## Updating it
+
+From your own checkout, `deploy/update.sh <ssh host>` pushes `main`, pulls it on the server and
+restarts the service. Add `--rebuild` when the change is to the tools (what gets generated), so the
+site's data is regenerated now instead of at the next world save.

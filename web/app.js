@@ -675,7 +675,7 @@ function drawFog() {
   fogCtx.clearRect(0, 0, N, N);
   fogCtx.drawImage(fogImg, 0, 0, N, N);
   fogCtx.globalCompositeOperation = 'destination-out';
-  fogCtx.filter = 'blur(1.5px)';
+  fogCtx.filter = `blur(${1.5 * N / 1024}px)`;
   fogCtx.drawImage(mask, 0, 0);
   fogCtx.filter = 'none';
 }
@@ -1008,6 +1008,15 @@ function panGlobe(dx, dy, size = $('disc').getBoundingClientRect().width) {
   gz.y = Math.min(lim, Math.max(-lim, gz.y + dy));
   layoutGlobe();
 }
+function animateZoom(to, fx, fy) {
+  const from = gz.zoom, t0 = performance.now();
+  const step = (now) => {
+    const k = Math.min(1, (now - t0) / 220), e = 1 - (1 - k) ** 3;
+    zoomGlobe(from * (to / from) ** e, fx, fy);
+    if (k < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
 function setupGlobeZoom() {
   const disc = $('disc');
   const pts = new Map();
@@ -1049,7 +1058,20 @@ function setupGlobeZoom() {
   window.addEventListener('pointerup', up);
   window.addEventListener('pointercancel', up);
   // a drag or pinch is not a tap: don't let it close the globe or pick a place
-  disc.addEventListener('click', (e) => { if (moved) { e.stopPropagation(); e.preventDefault(); moved = false; } }, true);
+  let tapTimer = null;
+  disc.addEventListener('click', (e) => {
+    if (moved) { e.stopPropagation(); e.preventDefault(); moved = false; return; }
+    if (!big() || e.target.closest('.mk, .poi')) return;
+    // on the open map, one tap closes it and two taps zoom in (or back out once fully zoomed)
+    e.stopPropagation();
+    if (tapTimer) {
+      clearTimeout(tapTimer); tapTimer = null;
+      const [cx, cy] = centre();
+      animateZoom(gz.zoom >= GZ_MAX - 0.01 ? 1 : gz.zoom * 2.5, e.clientX - cx, e.clientY - cy);
+    } else {
+      tapTimer = setTimeout(() => { tapTimer = null; toggleGlobe(false); }, 260);
+    }
+  }, true);
   disc.addEventListener('wheel', (e) => {
     if (!big()) return;
     e.preventDefault();
@@ -1059,15 +1081,20 @@ function setupGlobeZoom() {
 }
 
 function declutterMarkers() {
-  // in the big globe every label is shown; hide ones that would overlap (hover still reveals them)
+  // in the big globe every label is shown; hide ones that would overlap (hover or a tap still reveals them).
+  // Tapped labels win, then the current place, other places, and points of interest; zooming in makes room for more.
+  const rank = (m) => (m.classList.contains('pin') ? 0 : m.dataset.slug === current ? 1 : m.classList.contains('mk') ? 2 : 3);
+  const mks = [...document.querySelectorAll('.mk, .poi:not(.future)')].sort((a, b) => rank(a) - rank(b));
+  mks.forEach((m) => m.classList.remove('hide'));                        // all writes, then all reads: one layout
+  const rects = mks.map((m) => m.querySelector('span').getBoundingClientRect());
+  const disc = $('disc').getBoundingClientRect();
   const placed = [];
-  const mks = [...document.querySelectorAll('.mk')].sort((a, b) => (b.dataset.slug === current) - (a.dataset.slug === current));
-  for (const m of mks) {
-    m.classList.remove('hide');
-    const r = m.querySelector('span').getBoundingClientRect();
-    if (placed.some((p) => r.left < p.right + 4 && r.right > p.left - 4 && r.top < p.bottom + 2 && r.bottom > p.top - 2)) m.classList.add('hide');
-    else placed.push(r);
-  }
+  mks.forEach((m, i) => {
+    const r = rects[i];
+    const off = r.right < disc.left || r.left > disc.right || r.bottom < disc.top || r.top > disc.bottom;
+    if (!off && placed.some((p) => r.left < p.right + 4 && r.right > p.left - 4 && r.top < p.bottom + 2 && r.bottom > p.top - 2)) m.classList.add('hide');
+    else if (!off) placed.push(r);
+  });
 }
 
 // ---------------------------------------------------------------- portal travel
@@ -1118,8 +1145,22 @@ function setPlace(slug, arrive) {
   loadRegion(slug, arrive);
 }
 
+let hiMap = false;
+function loadHiMap() {
+  // a 4096 px map for zooming in; the small globe keeps the light 1024 px one
+  hiMap = true;
+  const img = $('layer').querySelector('img');
+  const pre = new Image();
+  pre.onload = () => {
+    img.src = pre.src;
+    if (fogCtx) { fogCtx.canvas.width = fogCtx.canvas.height = 2048; drawFog(); }
+  };
+  pre.src = fogCtx ? 'assets/worldmap_hi_color.webp' : 'assets/worldmap_hi.webp';
+}
 function toggleGlobe(force) {
   document.body.classList.toggle('big', force);
+  if (!hiMap && document.body.classList.contains('big')) loadHiMap();
+  document.querySelectorAll('.poi.pin').forEach((p) => p.classList.remove('pin'));
   Object.assign(gz, { zoom: 1, x: 0, y: 0 });
   // layout once now (start of the CSS transition) and again when it settles
   requestAnimationFrame(layoutGlobe);
@@ -1177,6 +1218,30 @@ function buildGlobe() {
     placePoi(el, v);
     mk.appendChild(el);
   }
+  for (const b of index.beds || []) {
+    const el = document.createElement('div');
+    el.className = 'poi bed';
+    el.dataset.found = b.found;
+    el.innerHTML = `<i>\u{1F6CF}\uFE0F</i><span>${b.names.length > 1 ? `Beds: ${b.names.map(esc).join(', ')}` : `${esc(b.names[0])}'s bed`}</span>`;
+    placePoi(el, b);
+    mk.appendChild(el);
+  }
+  for (const g of index.graves || []) {
+    const el = document.createElement('div');
+    el.className = 'poi grave';
+    el.dataset.found = g.found;
+    el.innerHTML = `<i>\u271D</i><span>${esc(g.name)}'s grave${g.day != null ? ` \u00b7 died day ${g.day}` : ''}</span>`;
+    placePoi(el, g);
+    mk.appendChild(el);
+  }
+  mk.querySelectorAll('.poi').forEach((el) => {
+    el.onclick = (e) => {
+      if (!document.body.classList.contains('big')) return;   // the small globe: open the map as usual
+      e.stopPropagation();
+      el.classList.toggle('pin');
+      declutterMarkers();
+    };
+  });
   new ResizeObserver(() => layoutGlobe()).observe($('disc'));
   $('disc').onclick = () => toggleGlobe();
   setupGlobeZoom();
