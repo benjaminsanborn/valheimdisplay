@@ -979,12 +979,83 @@ function layoutGlobe() {
   const t = Math.min(1, Math.max(0, (span - 1.2 * R) / (0.8 * R)));
   const cx = ((Math.min(...xs) + Math.max(...xs)) / 2) * (1 - t);
   const cz = ((Math.min(...zs) + Math.max(...zs)) / 2) * (1 - t);
-  const layerSize = (2 * R / span) * size;
+  // the enlarged globe can be pinched / wheeled into: zoom about the disc centre, then pan
+  const z = big ? gz.zoom : 1, px = big ? gz.x : 0, py = big ? gz.y : 0;
+  const layerSize = (2 * R / span) * size * z;
   const L = $('layer');
   L.style.width = L.style.height = `${layerSize}px`;
-  L.style.left = `${size / 2 - ((cx + R) / (2 * R)) * layerSize}px`;
-  L.style.top = `${size / 2 - ((R - cz) / (2 * R)) * layerSize}px`;
+  L.style.left = `${size / 2 + px - ((cx + R) / (2 * R)) * layerSize}px`;
+  L.style.top = `${size / 2 + py - ((R - cz) / (2 * R)) * layerSize}px`;
   if (big) requestAnimationFrame(declutterMarkers);
+}
+
+// ---- zooming into the enlarged globe (pinch on touch, wheel on desktop, drag to pan)
+const gz = { zoom: 1, x: 0, y: 0 };
+const GZ_MAX = 8;
+function zoomGlobe(zoom, fx, fy) {
+  // fx, fy: focal point in px from the disc centre; the map point under it stays put
+  const size = $('disc').getBoundingClientRect().width;
+  const z = Math.min(GZ_MAX, Math.max(1, zoom));
+  gz.x = fx - (fx - gz.x) * (z / gz.zoom);
+  gz.y = fy - (fy - gz.y) * (z / gz.zoom);
+  gz.zoom = z;
+  panGlobe(0, 0, size);
+}
+function panGlobe(dx, dy, size = $('disc').getBoundingClientRect().width) {
+  // keep the unzoomed view's area filling the disc
+  const lim = ((gz.zoom - 1) * size) / 2;
+  gz.x = Math.min(lim, Math.max(-lim, gz.x + dx));
+  gz.y = Math.min(lim, Math.max(-lim, gz.y + dy));
+  layoutGlobe();
+}
+function setupGlobeZoom() {
+  const disc = $('disc');
+  const pts = new Map();
+  let pinch = null, moved = false, startAt = null;
+  const centre = () => { const r = disc.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; };
+  const big = () => document.body.classList.contains('big');
+  disc.addEventListener('pointerdown', (e) => {
+    if (!big()) return;
+    pts.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pts.size === 1) { moved = false; startAt = [e.clientX, e.clientY]; }
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]), zoom: gz.zoom };
+    }
+  });
+  window.addEventListener('pointermove', (e) => {
+    const prev = pts.get(e.pointerId);
+    if (!prev) return;
+    const cur = [e.clientX, e.clientY];
+    pts.set(e.pointerId, cur);
+    if (!moved && Math.hypot(cur[0] - startAt[0], cur[1] - startAt[1]) > 6) moved = true;
+    if (pts.size >= 2 && pinch) {
+      moved = true;
+      const [a, b] = [...pts.values()];
+      const [cx, cy] = centre();
+      const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+      // pan by half this finger's motion (the midpoint moves half as far), then zoom about the midpoint
+      gz.x += (cur[0] - prev[0]) / 2; gz.y += (cur[1] - prev[1]) / 2;
+      zoomGlobe(pinch.zoom * Math.hypot(a[0] - b[0], a[1] - b[1]) / pinch.d, mx - cx, my - cy);
+    } else if (moved && gz.zoom > 1) {
+      panGlobe(cur[0] - prev[0], cur[1] - prev[1]);
+    }
+  });
+  const up = (e) => {
+    if (!pts.delete(e.pointerId)) return;
+    if (pts.size < 2) pinch = null;
+    if (pts.size === 1) startAt = [...pts.values()][0];
+  };
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+  // a drag or pinch is not a tap: don't let it close the globe or pick a place
+  disc.addEventListener('click', (e) => { if (moved) { e.stopPropagation(); e.preventDefault(); moved = false; } }, true);
+  disc.addEventListener('wheel', (e) => {
+    if (!big()) return;
+    e.preventDefault();
+    const [cx, cy] = centre();
+    zoomGlobe(gz.zoom * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), e.clientX - cx, e.clientY - cy);
+  }, { passive: false });
 }
 
 function declutterMarkers() {
@@ -1049,6 +1120,7 @@ function setPlace(slug, arrive) {
 
 function toggleGlobe(force) {
   document.body.classList.toggle('big', force);
+  Object.assign(gz, { zoom: 1, x: 0, y: 0 });
   // layout once now (start of the CSS transition) and again when it settles
   requestAnimationFrame(layoutGlobe);
   setTimeout(layoutGlobe, 320);
@@ -1107,6 +1179,7 @@ function buildGlobe() {
   }
   new ResizeObserver(() => layoutGlobe()).observe($('disc'));
   $('disc').onclick = () => toggleGlobe();
+  setupGlobeZoom();
   $('backdrop').onclick = () => toggleGlobe(false);
   window.addEventListener('keydown', (e) => { if (e.key === 'Escape') toggleGlobe(false); });
   layoutGlobe();
