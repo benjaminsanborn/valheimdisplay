@@ -211,10 +211,11 @@ export function createWeather(scene, nightU, scale = 1) {
 
   // per frame: follow the camera, size flakes for the zoom, place fog around the view, lightning
   function update(t, dt, camera, target, orthoSize, viewH) {
-    const zoom = camera.zoom;
-    const hh = orthoSize / zoom, hw = hh * (camera.right / camera.top);
+    // Huginn's perspective camera: a fixed box of weather around the raven, sized as seen ~25 m away
+    const persp = camera.isPerspectiveCamera;
+    const hh = persp ? 45 : orthoSize / camera.zoom, hw = persp ? hh * camera.aspect : hh * (camera.right / camera.top);
     const B = ((hw + hh / 0.67) / Math.SQRT2) * 1.15, By = hh * 1.05;
-    const ppm = (viewH * dpr()) / (2 * hh);
+    const ppm = persp ? (viewH * dpr()) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 25) : (viewH * dpr()) / (2 * hh);
     for (const o of Object.values(L)) {
       if (!o.visible) continue;
       const u = o.material.uniforms;
@@ -227,7 +228,10 @@ export function createWeather(scene, nightU, scale = 1) {
     L.rain.material.uniforms.uStreak.value = Math.max(1.1, 16 / ppm) / 22;
     // fog: a = amount at the middle of the view, b = at the far edge
     const D = camera.position.distanceTo(target), R = hh * 1.3, s = w.fogStrength;
-    if (s > 0) {
+    if (s > 0 && persp) {
+      fog.near = 4 + 90 * (1 - s);
+      fog.far = fog.near + 40 + 260 * (1 - s);
+    } else if (s > 0) {
       const a = 0.55 * s, b = Math.min(0.95, a + 0.3 + 0.25 * s), len = R / (b - a);
       fog.near = D - a * len;
       fog.far = fog.near + len;

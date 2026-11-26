@@ -59,6 +59,14 @@ controls.screenSpacePanning = false;
 controls.minZoom = 0.4;
 controls.maxZoom = 12;
 
+// ---------------------------------------------------------------- Huginn: fly freely as Odin's raven
+// a perspective camera next to the isometric one; WASD to fly, drag to look, slider for field of view
+const raven = new THREE.PerspectiveCamera(70, aspect(), 0.3, 6000);
+raven.rotation.order = 'YXZ';
+const huginn = { on: false, start: new URLSearchParams(location.search).get('huginn') === '1', yaw: 0, pitch: -0.35, keys: new Set(), vel: new THREE.Vector3(), drag: null };
+try { raven.fov = +localStorage.getItem('huginnFov') || 70; } catch {}
+const view = () => (huginn.on ? raven : camera);
+
 const clock = new THREE.Clock();
 let dayIdx = null;        // timelapse: index into index.dates (null = latest)
 let night = new URLSearchParams(location.search).get('night') === '1';
@@ -550,6 +558,7 @@ function resetView(zoom) {
   setFrustum();
   controls.target.copy(c);
   controls.update();
+  if (huginn.on) perchRaven();
 }
 
 function findFocus(info, fallback) {
@@ -587,11 +596,12 @@ async function loadRegion(slug, arrive) {
   scene.add(world);
   const T = buildTerrain(info, buf);
   const { focus, radius } = findFocus(info, T.center);
-  region = { info, extent: T.extent, center: T.center, focus, buildRadius: radius };
+  region = { info, extent: T.extent, center: T.center, focus, buildRadius: radius, sample: T.sample, T };
   if (arrive) region.focus = new THREE.Vector3(arrive.pos[0], arrive.pos[1], arrive.pos[2]);
   placeSun();
   // arriving through a portal: start close to the portal you came out of
   resetView(arrive ? Math.max(1, (region.buildRadius * 0.9) / 30) : undefined);
+  if (huginn.start) { huginn.start = false; toggleHuginn(true); }
   world.add(T.mesh, T.skirt, buildWater(info, T));
   $('loading').textContent = 'Growing grass…';
   await new Promise((r) => setTimeout(r, 0));
@@ -916,7 +926,7 @@ function applyLighting() {
     if (f) scene.fog.color.lerp(tint.set(0xdde6ff), Math.min(1, f * 0.25));
     scene.background.copy(scene.fog.color);
   } else {
-    scene.background.set(night ? 0x0b0e16 : 0x1b1915);
+    scene.background.set(huginn.on ? (night ? 0x0d1424 : 0x9db4c8) : night ? 0x0b0e16 : 0x1b1915);
   }
 }
 function applyNight() {
@@ -947,12 +957,14 @@ function updateLabels() {
   const w = window.innerWidth, h = window.innerHeight;
   const v = new THREE.Vector3();
   const placed = [];
-  const zoomedIn = camera.zoom > 1.8;
+  const cam = view();
+  const zoomedIn = huginn.on || camera.zoom > 1.8;
   const big = document.body.classList.contains('big');
   const d = regionDay();
   for (const L of labelEls) {
-    v.copy(L.pos).project(camera);
-    let on = (L.portal || zoomedIn) && !big && (!L.obj || visibleOn(L.obj, d)) && Math.abs(v.x) < 1.05 && Math.abs(v.y) < 1.05;
+    const near = !huginn.on || L.pos.distanceTo(raven.position) < (L.portal ? 260 : 90);
+    v.copy(L.pos).project(cam);
+    let on = (L.portal || zoomedIn) && near && !big && (!L.obj || visibleOn(L.obj, d)) && v.z < 1 && Math.abs(v.x) < 1.05 && Math.abs(v.y) < 1.05;
     const x = (v.x * 0.5 + 0.5) * w, y = (-v.y * 0.5 + 0.5) * h;
     if (on) {
       const bw = L.w || 80;
@@ -1097,6 +1109,147 @@ function declutterMarkers() {
   });
 }
 
+// ---------------------------------------------------------------- Huginn flight
+const _v = new THREE.Vector3(), _f = new THREE.Vector3(), _r = new THREE.Vector3();
+const UP = new THREE.Vector3(0, 1, 0);
+// lowest the raven may fly at (x, z): over the ground, the water, and the edge skirt
+function floorAt(x, z) {
+  const T = region.T;
+  const inside = Math.abs(x - T.cx) < T.W / 2 && Math.abs(z - T.cz) < T.D / 2;
+  return Math.max(inside ? T.sample(x, z) : -1e9, region.info.water) + 1.6;
+}
+function clampRaven() {
+  if (!region) return;
+  const p = raven.position, T = region.T, m = 40;
+  p.x = THREE.MathUtils.clamp(p.x, T.cx - T.W / 2 - m, T.cx + T.W / 2 + m);
+  p.z = THREE.MathUtils.clamp(p.z, T.cz - T.D / 2 - m, T.cz + T.D / 2 + m);
+  p.y = THREE.MathUtils.clamp(p.y, floorAt(p.x, p.z), region.center.y + region.extent * 1.2);
+}
+function aimRaven() {
+  huginn.pitch = THREE.MathUtils.clamp(huginn.pitch, -1.5, 1.5);
+  raven.rotation.set(huginn.pitch, huginn.yaw, 0);
+  raven.updateMatrixWorld();
+}
+// take off from where the isometric view is looking, seeing about as much of the place
+function perchRaven() {
+  const c = controls.target;
+  _f.subVectors(c, camera.position).normalize();
+  huginn.yaw = Math.atan2(-_f.x, -_f.z);
+  huginn.pitch = -0.45;
+  const hh = orthoSize / camera.zoom;
+  const d = THREE.MathUtils.clamp(hh / Math.tan(THREE.MathUtils.degToRad(raven.fov / 2)), 12, 400);
+  aimRaven();
+  raven.getWorldDirection(_v);
+  raven.position.copy(c).addScaledVector(_v, -d);
+  huginn.vel.set(0, 0, 0);
+  clampRaven();
+  raven.updateMatrixWorld();
+}
+// land: the isometric view centres on the ground the raven was looking at
+function landRaven() {
+  raven.getWorldDirection(_v);
+  let t = 60;
+  if (_v.y < -0.05) t = Math.min(400, Math.max(5, (raven.position.y - region.center.y) / -_v.y));
+  const off = _r.subVectors(camera.position, controls.target);
+  controls.target.copy(raven.position).addScaledVector(_v, t);
+  controls.target.y = Math.max(floorAt(controls.target.x, controls.target.z) - 1.6, region.center.y);
+  camera.position.copy(controls.target).add(off);
+  controls.update();
+}
+function ravenAhead() {
+  raven.getWorldDirection(_v);
+  return _f.copy(raven.position).addScaledVector(_v, 15).add(_r.set(0, -25, 0));
+}
+const FLY_KEYS = { KeyW: 1, KeyA: 1, KeyS: 1, KeyD: 1, KeyQ: 1, KeyE: 1, Space: 1, ShiftLeft: 1, ShiftRight: 1, ControlLeft: 1,
+  ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1 };
+function flyRaven(dt) {
+  if (!region) return;
+  const k = huginn.keys, has = (...c) => c.some((x) => k.has(x));
+  const fwd = (has('KeyW', 'ArrowUp') ? 1 : 0) - (has('KeyS', 'ArrowDown') ? 1 : 0);
+  const side = (has('KeyD', 'ArrowRight') ? 1 : 0) - (has('KeyA', 'ArrowLeft') ? 1 : 0);
+  const up = (has('KeyE', 'Space') ? 1 : 0) - (has('KeyQ', 'ControlLeft') ? 1 : 0);
+  // faster the higher you are, so crossing a big place doesn't take forever
+  const height = raven.position.y - floorAt(raven.position.x, raven.position.z);
+  const speed = (12 + height * 0.6) * (has('ShiftLeft', 'ShiftRight') ? 3.5 : 1);
+  raven.getWorldDirection(_f);
+  _r.crossVectors(_f, UP).normalize();
+  _v.set(0, 0, 0).addScaledVector(_f, fwd).addScaledVector(_r, side).addScaledVector(UP, up);
+  if (_v.lengthSq() > 1) _v.normalize();
+  _v.multiplyScalar(speed);
+  huginn.vel.lerp(_v, 1 - Math.exp(-dt * 8));     // glide in and out of moves
+  if (huginn.vel.lengthSq() < 1e-4) return;
+  raven.position.addScaledVector(huginn.vel, dt);
+  clampRaven();
+  raven.updateMatrixWorld();
+}
+function toggleHuginn(force) {
+  const on = force ?? !huginn.on;
+  if (on === huginn.on || !region) return;
+  huginn.on = on;
+  if (on) perchRaven(); else landRaven();
+  controls.enabled = !on;
+  huginn.keys.clear();
+  document.body.classList.toggle('huginn', on);
+  $('huginn').title = on ? 'Land (Esc)' : 'Huginn: fly as a raven (H)';
+  const u = new URL(location.href);
+  if (on) u.searchParams.set('huginn', '1'); else u.searchParams.delete('huginn');
+  history.replaceState(null, '', u);
+  applyLighting();
+  redrawShadows();
+}
+function setupHuginn() {
+  $('huginn').onclick = (e) => { e.currentTarget.blur(); toggleHuginn(); };
+  const fov = $('fov');
+  fov.value = raven.fov;
+  $('fovval').textContent = `${Math.round(raven.fov)}°`;
+  fov.oninput = () => {
+    raven.fov = +fov.value;
+    raven.updateProjectionMatrix();
+    $('fovval').textContent = `${fov.value}°`;
+    try { localStorage.setItem('huginnFov', fov.value); } catch {}
+  };
+  const typing = (e) => e.target.closest?.('input[type=text], textarea');
+  window.addEventListener('keydown', (e) => {
+    if (typing(e) || e.metaKey || e.altKey || document.body.classList.contains('big')) return;
+    if (e.code === 'KeyH' && !e.ctrlKey) { toggleHuginn(); return; }
+    if (!huginn.on) return;
+    if (e.code === 'Escape') { toggleHuginn(false); return; }
+    if (FLY_KEYS[e.code]) {
+      huginn.keys.add(e.code);
+      e.preventDefault();
+      if (document.activeElement !== document.body) document.activeElement?.blur?.();   // Space mustn't press a button
+    }
+  });
+  window.addEventListener('keyup', (e) => huginn.keys.delete(e.code));
+  window.addEventListener('blur', () => huginn.keys.clear());
+  // drag to look around; the wheel glides forward and back
+  const el = renderer.domElement;
+  el.addEventListener('pointerdown', (e) => {
+    if (!huginn.on) return;
+    huginn.drag = [e.clientX, e.clientY];
+    el.setPointerCapture(e.pointerId);
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (!huginn.on || !huginn.drag) return;
+    const s = THREE.MathUtils.degToRad(raven.fov) / innerHeight;   // drag one screen height = one field of view
+    huginn.yaw += (e.clientX - huginn.drag[0]) * s;
+    huginn.pitch += (e.clientY - huginn.drag[1]) * s;
+    huginn.drag = [e.clientX, e.clientY];
+    aimRaven();
+  });
+  const stop = () => { huginn.drag = null; };
+  el.addEventListener('pointerup', stop);
+  el.addEventListener('pointercancel', stop);
+  el.addEventListener('wheel', (e) => {
+    if (!huginn.on || !region) return;
+    e.preventDefault();
+    raven.getWorldDirection(_v);
+    raven.position.addScaledVector(_v, -Math.sign(e.deltaY) * Math.min(30, Math.abs(e.deltaY) * 0.05));
+    clampRaven();
+    raven.updateMatrixWorld();
+  }, { passive: false });
+}
+
 // ---------------------------------------------------------------- portal travel
 function travel(target) {
   const fx = $('flash');
@@ -1111,10 +1264,11 @@ function travel(target) {
 function portalAt(clientX, clientY) {
   const v = new THREE.Vector3();
   let best = null;
-  const r = 34 * Math.min(2.5, Math.max(0.6, camera.zoom));   // px
+  const r = huginn.on ? 40 : 34 * Math.min(2.5, Math.max(0.6, camera.zoom));   // px
   for (const L of labelEls) {
     if (!L.target || (L.obj && !visibleOn(L.obj, regionDay()))) continue;
-    v.copy(L.base).project(camera);
+    v.copy(L.base).project(view());
+    if (v.z > 1) continue;
     const d = Math.hypot((v.x * 0.5 + 0.5) * innerWidth - clientX, (-v.y * 0.5 + 0.5) * innerHeight - clientY);
     if (d < r && (!best || d < best.d)) best = { L, d };
   }
@@ -1268,6 +1422,7 @@ async function init() {
     applyNight();
   };
   $('weather').onclick = cycleWeather;
+  setupHuginn();
   $('hud').onclick = (e) => {
     e.stopPropagation();
     const on = $('panel').classList.toggle('on');
@@ -1286,6 +1441,7 @@ async function init() {
 window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
   setFrustum();
+  raven.aspect = aspect(); raven.updateProjectionMatrix();
   if (index) layoutGlobe();
 });
 
@@ -1296,18 +1452,23 @@ for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'touchstart'
 function loop(now) {
   requestAnimationFrame(loop);
   const idle = now - lastInput > 30000;
-  const fps = idle ? 15 : MOBILE ? 30 : 60;
+  const fps = idle && !huginn.keys.size ? 15 : MOBILE ? 30 : 60;
   if (now - lastFrame < 1000 / fps - 2) return;
   lastFrame = now;
   const dt = Math.min(clock.getDelta(), 0.1);
   timeUniform.value = clock.elapsedTime;
   animateFires(timeUniform.value);
-  weather.update(timeUniform.value, dt, camera, controls.target, orthoSize, window.innerHeight);
+  if (huginn.on) {
+    flyRaven(dt);
+    weather.update(timeUniform.value, dt, raven, ravenAhead(), orthoSize, window.innerHeight);
+  } else {
+    weather.update(timeUniform.value, dt, camera, controls.target, orthoSize, window.innerHeight);
+    controls.update();
+  }
   if (weather.state.p.lightning) applyLighting();
-  controls.update();
-  renderer.render(scene, camera);
+  renderer.render(scene, view());
   // labels only move when the camera, timeline or globe does
-  const key = camera.matrixWorld.elements.join() + camera.zoom + regionDay() + document.body.className + innerWidth + innerHeight;
+  const key = view().matrixWorld.elements.join() + camera.zoom + raven.fov + regionDay() + document.body.className + innerWidth + innerHeight;
   if (key !== labelKey) { labelKey = key; updateLabels(); }
 }
 setFrustum();

@@ -46,6 +46,24 @@
   #night:hover, #weather:hover { border-color: var(--accent); }
   #weather { position: fixed; top: 16px; right: 64px; width: 40px; height: 40px; border-radius: 50%; z-index: 4;
     border: 1px solid var(--line); background: var(--panel); color: var(--ink); font-size: 18px; cursor: pointer; }
+  #huginn { position: fixed; top: 16px; right: 112px; width: 40px; height: 40px; border-radius: 50%; z-index: 4;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; display: grid; place-items: center; padding: 0; }
+  #huginn:hover { border-color: var(--accent); }
+  body.huginn #huginn { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 10px rgba(224,166,74,.45); }
+  #flybox { position: fixed; left: 16px; bottom: 16px; z-index: 4; display: none; width: 230px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; font-size: 12px; }
+  body.huginn #flybox { display: block; }
+  body.big #flybox { display: none; }
+  #flybox b { color: var(--accent); font-weight: 600; letter-spacing: .03em; }
+  #flybox label { display: flex; align-items: center; gap: 8px; margin: 6px 0 4px; color: var(--muted); }
+  #flybox input { flex: 1; accent-color: var(--accent); min-width: 0; }
+  #flybox #fovval { color: var(--ink); min-width: 2.6em; text-align: right; font-variant-numeric: tabular-nums; }
+  #flybox .keys { color: var(--muted); font-size: 11px; line-height: 1.5; }
+  #flybox kbd { font: inherit; color: var(--ink); background: #2a2620; border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
+  body.huginn #view { cursor: grab; }
+  body.huginn #view:active { cursor: grabbing; }
+  @media (max-width: 640px) { #flybox { bottom: 116px; } }
+  @media (pointer: coarse) { #flybox .keys { display: none; } }
   #weather.off { color: var(--muted); text-decoration: line-through; }
   .shade { position: absolute; inset: 0; border-radius: 50%; pointer-events: none;
     background:
@@ -167,6 +185,12 @@
 <div id="panel"></div>
 <button id="night" title="Night">&#9790;</button>
 <button id="weather" title="Weather">&#9729;&#xFE0E;</button>
+<button id="huginn" title="Huginn: fly as a raven (H)"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M2 9.5c3.2-.4 5.8.4 8 2.2.5-1.6 1.6-2.6 3.1-2.9l1.6-1.6 1.1 1 1.9-.1-1.6 1.3c.4 1.3.2 2.6-.6 3.6 2.7-1.3 4.9-3.3 6.5-5.9-.5 4.6-3.2 8.4-7.8 9.6l1.3 3.1-2.4-2.6-1.9 2.3.6-3.1c-2.6-.6-4.2-2.6-5-4.9C5.5 11.2 3.6 10.4 2 9.5z"/></svg></button>
+<div id="flybox">
+  <b>Huginn</b> · flying as Odin's raven
+  <label>FOV <input id="fov" type="range" min="25" max="120" step="1"><span id="fovval"></span></label>
+  <div class="keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> fly · <kbd>E</kbd>/<kbd>Q</kbd> up/down · <kbd>Shift</kbd> faster<br>drag to look · scroll to glide · <kbd>Esc</kbd> land</div>
+</div>
 <div id="hint">Pick a place · pinch or double-tap to zoom</div>
 <div id="flash"></div>
 <div id="loading">Loading…</div>
