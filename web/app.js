@@ -63,7 +63,8 @@ controls.maxZoom = 12;
 // a perspective camera next to the isometric one; WASD to fly, drag to look, slider for field of view
 const raven = new THREE.PerspectiveCamera(70, aspect(), 0.3, 6000);
 raven.rotation.order = 'YXZ';
-const huginn = { on: false, start: new URLSearchParams(location.search).get('huginn') === '1', yaw: 0, pitch: -0.35, keys: new Set(), vel: new THREE.Vector3(), drag: null };
+const huginn = { on: false, start: new URLSearchParams(location.search).get('huginn') === '1', yaw: 0, pitch: -0.35, keys: new Set(), vel: new THREE.Vector3(), drag: null,
+  stick: { x: 0, y: 0 }, gyro: null };   // gyro: { q: phone orientation, off: yaw added by dragging }
 try { raven.fov = +localStorage.getItem('huginnFov') || 70; } catch {}
 const view = () => (huginn.on ? raven : camera);
 
@@ -1126,6 +1127,7 @@ function clampRaven() {
   p.y = THREE.MathUtils.clamp(p.y, floorAt(p.x, p.z), region.center.y + region.extent * 1.2);
 }
 function aimRaven() {
+  if (huginn.gyro?.q) return;   // the phone aims; see gyroAim
   huginn.pitch = THREE.MathUtils.clamp(huginn.pitch, -1.5, 1.5);
   raven.rotation.set(huginn.pitch, huginn.yaw, 0);
   raven.updateMatrixWorld();
@@ -1165,8 +1167,10 @@ const FLY_KEYS = { KeyW: 1, KeyA: 1, KeyS: 1, KeyD: 1, KeyQ: 1, KeyE: 1, Space: 
 function flyRaven(dt) {
   if (!region) return;
   const k = huginn.keys, has = (...c) => c.some((x) => k.has(x));
-  const fwd = (has('KeyW', 'ArrowUp') ? 1 : 0) - (has('KeyS', 'ArrowDown') ? 1 : 0);
-  const side = (has('KeyD', 'ArrowRight') ? 1 : 0) - (has('KeyA', 'ArrowLeft') ? 1 : 0);
+  gyroAim();
+  const st = huginn.stick;
+  const fwd = THREE.MathUtils.clamp((has('KeyW', 'ArrowUp') ? 1 : 0) - (has('KeyS', 'ArrowDown') ? 1 : 0) - st.y, -1, 1);
+  const side = THREE.MathUtils.clamp((has('KeyD', 'ArrowRight') ? 1 : 0) - (has('KeyA', 'ArrowLeft') ? 1 : 0) + st.x, -1, 1);
   const up = (has('KeyE', 'Space') ? 1 : 0) - (has('KeyQ', 'ControlLeft') ? 1 : 0);
   // faster the higher you are, so crossing a big place doesn't take forever
   const height = raven.position.y - floorAt(raven.position.x, raven.position.z);
@@ -1182,6 +1186,73 @@ function flyRaven(dt) {
   clampRaven();
   raven.updateMatrixWorld();
 }
+// ---- phones: a thumbstick to fly, hold buttons to climb and dive, and the gyro to look around
+function setupTouchFlight() {
+  const stick = $('stick'), knob = stick.querySelector('i');
+  let id = null;
+  const move = (e) => {
+    const r = stick.getBoundingClientRect(), R = r.width / 2;
+    const x = (e.clientX - r.left - R) / R, y = (e.clientY - r.top - R) / R;
+    const l = Math.max(Math.hypot(x, y), 1e-6), m = Math.min(l, 1);
+    knob.style.transform = `translate(${(x / l) * m * R * 0.6}px, ${(y / l) * m * R * 0.6}px)`;
+    // a small dead zone, then a curve for fine control near the middle
+    const out = m < 0.12 ? 0 : ((m - 0.12) / 0.88) ** 1.5;
+    huginn.stick.x = (x / l) * out; huginn.stick.y = (y / l) * out;
+  };
+  stick.addEventListener('pointerdown', (e) => { if (id != null) return; id = e.pointerId; stick.setPointerCapture(id); move(e); lastInput = performance.now(); });
+  stick.addEventListener('pointermove', (e) => { if (e.pointerId === id) move(e); });
+  const end = (e) => {
+    if (e.pointerId !== id) return;
+    id = null; huginn.stick.x = huginn.stick.y = 0; knob.style.transform = '';
+  };
+  stick.addEventListener('pointerup', end);
+  stick.addEventListener('pointercancel', end);
+  for (const [btn, code] of [['climb', 'KeyE'], ['dive', 'KeyQ']]) {
+    const b = $(btn);
+    b.addEventListener('pointerdown', (e) => { b.setPointerCapture(e.pointerId); huginn.keys.add(code); b.classList.add('on'); });
+    const up = () => { huginn.keys.delete(code); b.classList.remove('on'); };
+    b.addEventListener('pointerup', up);
+    b.addEventListener('pointercancel', up);
+    b.addEventListener('contextmenu', (e) => e.preventDefault());
+  }
+  if (!('DeviceOrientationEvent' in window) || !MOBILE) { $('gyro').style.display = 'none'; return; }
+  $('gyro').onclick = async () => {
+    if (huginn.gyro) { setGyro(false); return; }
+    // iOS asks once, and only from a tap
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try { if (await DeviceOrientationEvent.requestPermission() !== 'granted') return; } catch { return; }
+    }
+    setGyro(true);
+  };
+}
+const _e = new THREE.Euler(), _q = new THREE.Quaternion(), _qy = new THREE.Quaternion();
+const Q_FLAT = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2);   // looking out the back of the phone, not down at it
+function onOrient(e) {
+  const g = huginn.gyro;
+  if (!g || e.alpha == null) return;
+  const d = THREE.MathUtils.DEG2RAD;
+  const screenAngle = (screen.orientation?.angle ?? window.orientation ?? 0) * d;
+  _e.set(e.beta * d, e.alpha * d, -e.gamma * d, 'YXZ');
+  const q = (g.q ||= new THREE.Quaternion());
+  q.setFromEuler(_e).multiply(Q_FLAT).multiply(_qy.setFromAxisAngle(_r.set(0, 0, 1), -screenAngle));
+  // first reading: keep facing the way the raven already was
+  if (g.off == null) { _e.setFromQuaternion(q, 'YXZ'); g.off = huginn.yaw - _e.y; }
+}
+function gyroAim() {
+  const g = huginn.gyro;
+  if (!g?.q || g.off == null) return;
+  raven.quaternion.copy(_qy.setFromAxisAngle(UP, g.off)).multiply(g.q);
+  _e.setFromQuaternion(raven.quaternion, 'YXZ');
+  huginn.yaw = _e.y; huginn.pitch = _e.x;
+  raven.updateMatrixWorld();
+}
+function setGyro(on) {
+  if (!on === !huginn.gyro) return;
+  huginn.gyro = on ? { q: null, off: null } : null;
+  if (on) window.addEventListener('deviceorientation', onOrient);
+  else { window.removeEventListener('deviceorientation', onOrient); aimRaven(); }
+  $('gyro').classList.toggle('on', on);
+}
 function toggleHuginn(force) {
   const on = force ?? !huginn.on;
   if (on === huginn.on || !region) return;
@@ -1189,6 +1260,8 @@ function toggleHuginn(force) {
   if (on) perchRaven(); else landRaven();
   controls.enabled = !on;
   huginn.keys.clear();
+  huginn.stick.x = huginn.stick.y = 0;
+  if (!on) setGyro(false);
   document.body.classList.toggle('huginn', on);
   $('huginn').title = on ? 'Land (Esc)' : 'Huginn: fly as a raven (H)';
   const u = new URL(location.href);
@@ -1225,21 +1298,23 @@ function setupHuginn() {
   // drag to look around; the wheel glides forward and back
   const el = renderer.domElement;
   el.addEventListener('pointerdown', (e) => {
-    if (!huginn.on) return;
-    huginn.drag = [e.clientX, e.clientY];
+    if (!huginn.on || huginn.drag) return;
+    huginn.drag = [e.clientX, e.clientY, e.pointerId];
     el.setPointerCapture(e.pointerId);
   });
   el.addEventListener('pointermove', (e) => {
-    if (!huginn.on || !huginn.drag) return;
+    if (!huginn.on || !huginn.drag || e.pointerId !== huginn.drag[2]) return;
     const s = THREE.MathUtils.degToRad(raven.fov) / innerHeight;   // drag one screen height = one field of view
+    if (huginn.gyro) huginn.gyro.off += (e.clientX - huginn.drag[0]) * s;
     huginn.yaw += (e.clientX - huginn.drag[0]) * s;
     huginn.pitch += (e.clientY - huginn.drag[1]) * s;
-    huginn.drag = [e.clientX, e.clientY];
+    huginn.drag[0] = e.clientX; huginn.drag[1] = e.clientY;
     aimRaven();
   });
-  const stop = () => { huginn.drag = null; };
+  const stop = (e) => { if (huginn.drag?.[2] === e.pointerId) huginn.drag = null; };
   el.addEventListener('pointerup', stop);
   el.addEventListener('pointercancel', stop);
+  setupTouchFlight();
   el.addEventListener('wheel', (e) => {
     if (!huginn.on || !region) return;
     e.preventDefault();
@@ -1452,7 +1527,8 @@ for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'touchstart'
 function loop(now) {
   requestAnimationFrame(loop);
   const idle = now - lastInput > 30000;
-  const fps = idle && !huginn.keys.size ? 15 : MOBILE ? 30 : 60;
+  const flying = huginn.keys.size || huginn.stick.x || huginn.stick.y || huginn.gyro;
+  const fps = idle && !flying ? 15 : MOBILE ? 30 : 60;
   if (now - lastFrame < 1000 / fps - 2) return;
   lastFrame = now;
   const dt = Math.min(clock.getDelta(), 0.1);
