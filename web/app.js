@@ -1066,6 +1066,7 @@ function applyLighting() {
   hemi.intensity = (night ? 0.55 : 1.1) * p.hemi + f * (night ? 3 : 1.6);
   sun.intensity = (night ? 0.45 : 2.6) * p.sun;
   overcastUniform.value = p.overcast;
+  wild.light.value = (night ? 0.3 : 1) * (0.55 + 0.45 * Math.min(1, p.sun));
   windUniform.value = 1 + Math.hypot(p.wind[0], p.wind[1]) / 3;
   if (p.fog) {
     scene.fog.color.copy(weather.state.fogColor).multiplyScalar(night ? 0.13 : 1);
@@ -1140,11 +1141,14 @@ function layoutGlobe() {
   const span = Math.min(2 * R, big ? fit * 1.5 + 2500 : fit * 1.35 + 1500);
   // the wider the view, the more it centres on the middle of the world so the world's edge stays round
   const t = Math.min(1, Math.max(0, (span - 1.2 * R) / (0.8 * R)));
-  const cx = ((Math.min(...xs) + Math.max(...xs)) / 2) * (1 - t);
-  const cz = ((Math.min(...zs) + Math.max(...zs)) / 2) * (1 - t);
+  let cx = ((Math.min(...xs) + Math.max(...xs)) / 2) * (1 - t);
+  let cz = ((Math.min(...zs) + Math.max(...zs)) / 2) * (1 - t);
+  let sp = span;
+  // flying: the small globe is a minimap that follows the raven
+  if (huginn.on && !big && region) { const w = ravenWorldPos(); cx = w.x; cz = w.z; sp = MINIMAP_SPAN; }
   // the enlarged globe can be pinched / wheeled into: zoom about the disc centre, then pan
   const z = big ? gz.zoom : 1, px = big ? gz.x : 0, py = big ? gz.y : 0;
-  const layerSize = (2 * R / span) * size * z;
+  const layerSize = (2 * R / sp) * size * z;
   const L = $('layer');
   L.style.width = L.style.height = `${layerSize}px`;
   L.style.left = `${size / 2 + px - ((cx + R) / (2 * R)) * layerSize}px`;
@@ -1356,6 +1360,7 @@ async function loadTile(t) {
     const T = buildTerrain(info, buf, { material: wf.material });
     Object.assign(entry, { state: 'ready', mesh: T.mesh, sample: T.sample });
     wf.group.add(T.mesh);
+    loadWild(t, entry);
     for (const { L, sp } of wf.lights) {
       if (tileAt(L.x, L.z) !== entry) continue;
       sp.position.y = T.sample(L.x, -L.z) + (L.kind === 'fire' ? 1.2 : 2.2);
@@ -1371,6 +1376,7 @@ async function loadTile(t) {
 function unloadTile(key) {
   const e = wf.tiles.get(key);
   wf.tiles.delete(key);
+  unloadWild(e);
   if (!e?.mesh) return;
   wf.group.remove(e.mesh);
   e.mesh.geometry.dispose();
@@ -1400,6 +1406,7 @@ function updateWorld(now) {
   }
   want.sort((a, b) => a[0] - b[0]);
   for (const [, t] of want.slice(0, Math.max(0, 4 - wf.inflight))) loadTile(t);
+  updateNearWild();
   // the sea follows the raven
   const moved = wf.waterAt ? Math.hypot(raven.position.x - wf.waterAt.x, raven.position.z - wf.waterAt.y) : Infinity;
   if (moved > VIEW * 0.35 || (wf.waterDirty && now - wf.waterDirty > 1500)) rebuildWorldWater();
@@ -1441,6 +1448,201 @@ function updateWorld(now) {
       setPlace(best.r.slug, null, true).finally(() => { wf.switching = false; });
     }
   }
+}
+
+// ---------------------------------------------------------------- trees and rocks out in the wild
+// From the world save, per tile (tools/export_world.py). Near the raven they're the real models; beyond
+// that, a picture of each model (baked once into an atlas) on a quad that turns to face you. The near
+// ring is rebuilt as the raven moves, and the pictures inside it are hidden in the shader, so the two
+// never overlap. Everything lives in the tile group, in absolute (x, y, -z) coordinates.
+const NEAR = MOBILE ? 250 : 450;
+const ATLAS = MOBILE ? 1024 : 2048, CELL = MOBILE ? 128 : 256, CELLS = (ATLAS / CELL) ** 2;
+const wild = { kinds: new Map(), at: null, dirty: false, near: new Map(), rt: null, mat: null, quad: null,
+  light: { value: 1 } };
+function wildMaterial() {
+  if (wild.mat) return wild.mat;
+  wild.rt = new THREE.WebGLRenderTarget(ATLAS, ATLAS, { generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
+  wild.quad = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0);
+  wild.mat = new THREE.ShaderMaterial({
+    fog: true,
+    uniforms: { ...THREE.UniformsUtils.clone(THREE.UniformsLib.fog), map: { value: wild.rt.texture }, uLight: wild.light,
+      uNearAt: { value: new THREE.Vector3(1e9, 0, 1e9) }, uNear: { value: NEAR },
+      uRect: { value: Array.from({ length: CELLS }, () => new THREE.Vector4()) },
+      uBox: { value: Array.from({ length: CELLS }, () => new THREE.Vector4()) } },
+    vertexShader: `
+      attribute float kind;
+      uniform vec3 uNearAt; uniform float uNear; uniform vec4 uRect[${CELLS}]; uniform vec4 uBox[${CELLS}];
+      varying vec2 vUv;
+      #include <fog_pars_vertex>
+      void main() {
+        int k = int(kind + 0.5);
+        vec4 box = uBox[k];   // width, bottom, height (model units)
+        vec3 ip = vec3(instanceMatrix[3]);
+        vec2 d = ip.xz - uNearAt.xz;
+        if (box.z == 0.0 || dot(d, d) < uNear * uNear) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+        float sx = length(vec3(instanceMatrix[0])), sy = length(vec3(instanceMatrix[1]));
+        vec4 c = modelMatrix * vec4(ip, 1.0);
+        vec3 toCam = cameraPosition - c.xyz; toCam.y = 0.0;
+        vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), toCam) + vec3(1e-6, 0.0, 0.0));
+        vec3 wp = c.xyz + right * position.x * box.x * sx + vec3(0.0, (box.y + position.y * box.z) * sy, 0.0);
+        vUv = uRect[k].xy + uv * uRect[k].zw;
+        vec4 mvPosition = viewMatrix * vec4(wp, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }`,
+    fragmentShader: `
+      uniform sampler2D map; uniform float uLight;
+      varying vec2 vUv;
+      #include <fog_pars_fragment>
+      void main() {
+        vec4 c = texture2D(map, vUv);
+        if (c.a < 0.5) discard;
+        gl_FragColor = vec4(c.rgb / c.a * uLight, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+        #include <fog_fragment>
+      }`,
+  });
+  return wild.mat;
+}
+// draw a model from the side into its cell of the atlas
+const bake = { scene: null, cam: new THREE.OrthographicCamera() };
+function bakeKind(i, parts, mi) {
+  if (!bake.scene) {
+    bake.scene = new THREE.Scene();
+    const d = new THREE.DirectionalLight(0xffffff, 2.2);
+    d.position.set(0.6, 1, 1);
+    bake.scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x4a4030, 1.3), d);
+  }
+  const g = new THREE.Group();
+  for (const part of parts) g.add(new THREE.Mesh(part.geometry, part.material));
+  bake.scene.add(g);
+  const half = Math.max(Math.abs(mi.min[0]), Math.abs(mi.max[0]), Math.abs(mi.min[2]), Math.abs(mi.max[2]), 0.01);
+  const w = 2 * half, h = Math.max(mi.max[1] - mi.min[1], 0.01);
+  const k = (CELL - 4) / Math.max(w, h), pw = Math.max(2, Math.round(w * k)), ph = Math.max(2, Math.round(h * k));
+  const cx = (i % (ATLAS / CELL)) * CELL + 2 + Math.floor((CELL - 4 - pw) / 2), cy = Math.floor(i / (ATLAS / CELL)) * CELL + 2;
+  const cam = bake.cam;
+  Object.assign(cam, { left: -half, right: half, top: mi.max[1], bottom: mi.min[1], near: 0.01, far: half * 4 + 10 });
+  cam.position.set(0, 0, half * 2 + 5);
+  cam.updateProjectionMatrix();
+  cam.updateMatrixWorld();
+  const rt = wild.rt, shadowPending = renderer.shadowMap.needsUpdate;
+  const clear = renderer.getClearColor(new THREE.Color()), clearA = renderer.getClearAlpha();
+  rt.viewport.set(cx, cy, pw, ph);
+  rt.scissor.set(cx, cy, pw, ph);
+  rt.scissorTest = true;
+  renderer.setRenderTarget(rt);
+  renderer.setClearColor(0x000000, 0);
+  renderer.clear();
+  renderer.render(bake.scene, cam);
+  renderer.setRenderTarget(null);
+  renderer.setClearColor(clear, clearA);
+  renderer.shadowMap.needsUpdate = shadowPending;
+  bake.scene.remove(g);
+  wild.mat.uniforms.uRect.value[i].set(cx / ATLAS, cy / ATLAS, pw / ATLAS, ph / ATLAS);
+  wild.mat.uniforms.uBox.value[i].set(w, mi.min[1], h, 0);
+}
+function wildKind(i) {
+  let K = wild.kinds.get(i);
+  if (K) return K;
+  const name = wf.meta.models[i], mi = modelInfo[name];
+  K = { name, ready: false };
+  wild.kinds.set(i, K);
+  if (!mi || i >= CELLS) return K;
+  loadModel(name).then((parts) => {
+    if (!parts) return;
+    wildMaterial();
+    bakeKind(i, parts, mi);
+    Object.assign(K, { parts, ready: true });
+    wild.dirty = true;
+  });
+  return K;
+}
+async function loadWild(t, entry) {
+  const [tx, tz, , sig] = t;
+  if (!sig) return;
+  const buf = await fetch(`assets/world/${tileKey(tx, tz)}.obj.bin?v=${sig}`).then((r) => (r.ok ? r.arrayBuffer() : null)).catch(() => null);
+  if (!buf || wf.tiles.get(tileKey(tx, tz)) !== entry) return;
+  const n = new DataView(buf).getUint32(0, true);
+  let o = 4;
+  const take = (Type, len, bytes) => { const a = new Type(buf.slice(o, o + len * bytes)); o += len * bytes; return a; };
+  const model = take(Uint16Array, n, 2), pos = take(Float32Array, n * 3, 4), quat = take(Int8Array, n * 4, 1), scale = take(Uint16Array, n * 3, 2);
+  const kind = new Float32Array(n);
+  const m4 = new THREE.Matrix4(), p = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
+  const mat = wildMaterial(), geo = wild.quad.clone();
+  geo.setAttribute('kind', new THREE.InstancedBufferAttribute(kind, 1));
+  const im = new THREE.InstancedMesh(geo, mat, n);
+  for (let i = 0; i < n; i++) {
+    wildKind(model[i]);
+    kind[i] = model[i];
+    p.set(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+    s.set(scale[i * 3] / 4096, scale[i * 3 + 1] / 4096, scale[i * 3 + 2] / 4096);
+    im.setMatrixAt(i, m4.compose(p, q.identity(), s));
+  }
+  im.computeBoundingSphere();
+  if (im.boundingSphere) im.boundingSphere.radius += 40;   // the quads stand up from the points
+  entry.wild = { n, model, pos, quat, scale, im };
+  wf.group.add(im);
+  wild.dirty = true;
+}
+function unloadWild(entry) {
+  if (!entry?.wild) return;
+  wf.group.remove(entry.wild.im);
+  entry.wild.im.geometry.dispose();
+  entry.wild.im.dispose();
+  entry.wild = null;
+  wild.dirty = true;
+}
+// the real models within NEAR of the raven
+function updateNearWild() {
+  const at = new THREE.Vector3().copy(raven.position).sub(wf.group.position);
+  if (!wild.dirty && wild.at && Math.hypot(at.x - wild.at.x, at.z - wild.at.z) < 40) return;
+  wild.dirty = false;
+  wild.at = at;
+  if (wild.mat) wild.mat.uniforms.uNearAt.value.copy(at);
+  const lists = new Map(), N2 = NEAR * NEAR, T = wf.meta.tile;
+  for (const [key, e] of wf.tiles) {
+    if (!e.wild) continue;
+    const [tx, tz] = key.split('_').map(Number);
+    const x0 = tx * T - 32, z0 = -(tz * T - 32 + T);   // tile square in (x, -z)
+    const dx = Math.max(x0 - at.x, 0, at.x - (x0 + T)), dz = Math.max(z0 - at.z, 0, at.z - (z0 + T));
+    if (dx * dx + dz * dz > N2) continue;
+    const w = e.wild;
+    for (let i = 0; i < w.n; i++) {
+      const ex = w.pos[i * 3] - at.x, ez = w.pos[i * 3 + 2] - at.z;
+      if (ex * ex + ez * ez > N2 || !wild.kinds.get(w.model[i])?.ready) continue;
+      let l = lists.get(w.model[i]);
+      if (!l) lists.set(w.model[i], (l = []));
+      l.push(w, i);
+    }
+  }
+  const m4 = new THREE.Matrix4(), p = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
+  for (const [k, meshes] of wild.near) if (!lists.has(k)) for (const im of meshes) im.count = 0;
+  for (const [k, l] of lists) {
+    const K = wild.kinds.get(k), count = l.length / 2;
+    let meshes = wild.near.get(k);
+    if (!meshes || meshes[0].instanceMatrix.count < count) {
+      for (const im of meshes || []) { wf.group.remove(im); im.dispose(); }
+      const cap = Math.ceil((count * 1.5) / 64) * 64;
+      meshes = K.parts.map((part) => {
+        const im = new THREE.InstancedMesh(part.geometry, part.material, cap);
+        im.castShadow = im.receiveShadow = true;
+        wf.group.add(im);
+        return im;
+      });
+      wild.near.set(k, meshes);
+    }
+    for (let j = 0; j < count; j++) {
+      const w = l[j * 2], i = l[j * 2 + 1];
+      p.set(w.pos[i * 3], w.pos[i * 3 + 1], w.pos[i * 3 + 2]);
+      q.set(w.quat[i * 4] / 127, w.quat[i * 4 + 1] / 127, w.quat[i * 4 + 2] / 127, w.quat[i * 4 + 3] / 127).normalize();
+      s.set(w.scale[i * 3] / 4096, w.scale[i * 3 + 1] / 4096, w.scale[i * 3 + 2] / 4096);
+      m4.compose(p, q, s);
+      for (const im of meshes) im.setMatrixAt(j, m4);
+    }
+    for (const im of meshes) { im.count = count; im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere(); }
+  }
+  redrawShadows();
 }
 
 // ---------------------------------------------------------------- Huginn flight
@@ -1621,6 +1823,9 @@ function toggleHuginn(force) {
   huginn.stick.x = huginn.stick.y = 0;
   if (!on) setGyro(false);
   document.body.classList.toggle('huginn', on);
+  ravenMapAt = 0;
+  if (on && !hiMap) loadHiMap();   // the minimap zooms in close: use the sharp map
+  requestAnimationFrame(layoutGlobe);
   $('huginn').title = on ? 'Land (Esc)' : 'Huginn: fly as a raven (H)';
   const u = new URL(location.href);
   if (on) u.searchParams.set('huginn', '1'); else u.searchParams.delete('huginn');
@@ -1774,6 +1979,18 @@ function loadHiMap() {
   };
   pre.src = fogCtx ? 'assets/worldmap_hi_color.webp' : 'assets/worldmap_hi.webp';
 }
+// where the raven is, on the map
+const MINIMAP_SPAN = 3200;   // m across the small globe while flying
+let ravenMapAt = 0;
+function updateRavenMarker(now) {
+  const el = $('ravenmk');
+  if (!el || !huginn.on || !region || now - ravenMapAt < 120) return;
+  ravenMapAt = now;
+  const w = ravenWorldPos();
+  placePoi(el, w);
+  el.style.transform = `translate(-50%, -50%) rotate(${-huginn.yaw}rad)`;
+  if (!document.body.classList.contains('big')) layoutGlobe();
+}
 function toggleGlobe(force) {
   document.body.classList.toggle('big', force);
   if (!hiMap && document.body.classList.contains('big')) loadHiMap();
@@ -1818,6 +2035,11 @@ function buildGlobe() {
     };
     mk.appendChild(el);
   }
+  const rv = document.createElement('div');
+  rv.id = 'ravenmk';
+  rv.title = 'You (Huginn)';
+  rv.innerHTML = '<svg viewBox="-12 -12 24 24" width="22" height="22" aria-hidden="true"><path d="M0-10 7 8 0 4-7 8z"/></svg>';
+  mk.appendChild(rv);
   for (const L of index.locations || []) {
     const el = document.createElement('div');
     const boss = L.kind === 'boss' ? index.bosses[L.boss] : null;
@@ -1949,7 +2171,7 @@ function loop(now) {
   const dt = Math.min(clock.getDelta(), 0.1);
   timeUniform.value = clock.elapsedTime;
   animateFires(timeUniform.value);
-  if (huginn.on) { flyRaven(dt); updateWorld(now); }
+  if (huginn.on) { flyRaven(dt); updateWorld(now); updateRavenMarker(now); }
   else controls.update();
   weather.update(timeUniform.value, dt, view(), controls.target, orthoSize);
   if (worldActive()) {

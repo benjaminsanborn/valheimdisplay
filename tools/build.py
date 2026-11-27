@@ -27,6 +27,9 @@ if '--models-only' not in sys.argv:
         if only and r['slug'] not in only:
             continue
         run_tool('export_region', 'data/world', 'web/assets', r['slug'], r['title'], r['x'], r['z'], r.get('radius', 120))
+# low-detail terrain and the trees and rocks everywhere explored, for flying between places
+# (before the models step: it lists the tree and rock models it needs)
+run_tool('export_world', 'data/world', 'web/assets')
 if not os.path.exists('web/assets/terrain/layer0.jpg'):
     run_tool('export_terrain_textures', GAME, 'web/assets/terrain')
 manifest = json.load(open('web/assets/models.json')) if os.path.exists('web/assets/models.json') else {}
@@ -42,7 +45,6 @@ if need:
 run_tool('export_icons', GAME, 'web/assets/icons')
 run_tool('export_worldmap', 'data/world', 'web/assets/worldmap.png', 1024)
 run_tool('export_worldmap', 'data/world', 'web/assets/worldmap_hi.webp', 4096)   # loaded when the big map opens
-run_tool('export_world', 'data/world', 'web/assets')   # low-detail terrain everywhere explored, for flying between places
 
 # link portals: each portal label gets the place + spot its partner (same tag) is in
 portals = []
