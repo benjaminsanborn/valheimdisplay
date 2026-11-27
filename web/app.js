@@ -1542,7 +1542,8 @@ function updateWorld(now) {
   }
   // a place becomes the active one once you're over it (k < 1: inside its radius). The current one
   // stays unless you've left it or are clearly nearer the middle of another, so edges don't flicker.
-  if (!wf.switching && !wf.jumpTo && best && best.k < 1 && best.r.slug !== current && (curK > 1 || best.k < curK * 0.7)) {
+  // (not while a place you chose, from a portal or the map, is still loading: that would cancel it)
+  if (!wf.switching && !wf.jumpTo && region?.slug === current && best && best.k < 1 && best.r.slug !== current && (curK > 1 || best.k < curK * 0.7)) {
     const P = places.get(best.r.slug);
     if (P?.done) {
       wf.switching = true;
