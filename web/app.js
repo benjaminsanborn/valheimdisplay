@@ -144,7 +144,20 @@ function loadModel(name) {
 }
 
 // ---------------------------------------------------------------- terrain
-// tile: the low-detail world terrain around places (Huginn mode): `hole` is where the detailed place is
+// rectangles (min x, min z, max x, max z in scene coordinates) where a detailed place is drawn, so the
+// low-detail world terrain and sea leave a hole there
+const MAX_HOLES = 8;
+const HOLES_GLSL = `uniform vec4 holes[${MAX_HOLES}]; uniform int holeCount;
+  bool inHole(vec2 p) {
+    for (int i = 0; i < ${MAX_HOLES}; i++) {
+      if (i >= holeCount) break;
+      vec4 h = holes[i];
+      if (p.x > h.x && p.x < h.z && p.y > h.y && p.y < h.w) return true;
+    }
+    return false;
+  }`;
+const newHoles = () => ({ holes: { value: Array.from({ length: MAX_HOLES }, () => new THREE.Vector4()) }, holeCount: { value: 0 } });
+// tile: the low-detail world terrain around places (Huginn mode): `holes` are where detailed places are
 // drawn instead, and unexplored ground is greyed out like the map's fog of war
 function terrainMaterial(waterLevel, tile = null) {
   const mat = new THREE.MeshStandardMaterial({ roughness: 1, metalness: 0 });
@@ -152,7 +165,8 @@ function terrainMaterial(waterLevel, tile = null) {
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.waterLevel = { value: waterLevel };
     if (tile) {
-      sh.uniforms.hole = tile.hole;
+      sh.uniforms.holes = tile.holes;
+      sh.uniforms.holeCount = tile.holeCount;
       sh.vertexShader = sh.vertexShader
         .replace('#include <common>', `#include <common>
           attribute float explored; varying float vExp; varying vec2 vWorldXZ;`)
@@ -160,9 +174,9 @@ function terrainMaterial(waterLevel, tile = null) {
           vExp = explored; vWorldXZ = (modelMatrix * vec4(transformed, 1.0)).xz;`);
       sh.fragmentShader = sh.fragmentShader
         .replace('#include <common>', `#include <common>
-          uniform vec4 hole; varying float vExp; varying vec2 vWorldXZ;`)
+          ${HOLES_GLSL} varying float vExp; varying vec2 vWorldXZ;`)
         .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
-          if (vWorldXZ.x > hole.x && vWorldXZ.x < hole.z && vWorldXZ.y > hole.y && vWorldXZ.y < hole.w) discard;`)
+          if (inHole(vWorldXZ)) discard;`)
         .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
           float grey = dot(diffuseColor.rgb, vec3(0.3, 0.59, 0.11));
           diffuseColor.rgb = mix(vec3(grey) * vec3(0.42, 0.45, 0.52), diffuseColor.rgb, vExp);`);
@@ -301,8 +315,7 @@ function buildTerrain(info, buf, tile = null) {
 }
 
 // ---------------------------------------------------------------- water
-const NO_HOLE = { value: new THREE.Vector4(1e9, 1e9, -1e9, -1e9) };
-function buildWater(info, T, step = 2, hole = NO_HOLE) {
+function buildWater(info, T, step = 2, holes = newHoles()) {
   const nx = Math.ceil(T.W / step) + 1, nz = Math.ceil(T.D / step) + 1;
   const g = new THREE.PlaneGeometry(T.W, T.D, nx - 1, nz - 1);
   g.rotateX(-Math.PI / 2);
@@ -317,7 +330,7 @@ function buildWater(info, T, step = 2, hole = NO_HOLE) {
     depthWrite: false,
     fog: true,
     uniforms: { ...THREE.UniformsUtils.clone(THREE.UniformsLib.fog), time: timeUniform, nmap: { value: shared.nmap },
-      foam: { value: shared.foam }, sunDir: { value: sunDir }, night: nightUniform, overcast: overcastUniform, hole },
+      foam: { value: shared.foam }, sunDir: { value: sunDir }, night: nightUniform, overcast: overcastUniform, ...holes },
     vertexShader: `
       attribute float depth;
       varying float vDepth; varying vec3 vWorld;
@@ -332,12 +345,12 @@ function buildWater(info, T, step = 2, hole = NO_HOLE) {
       }`,
     fragmentShader: `
       uniform float time; uniform sampler2D nmap; uniform sampler2D foam; uniform vec3 sunDir; uniform float night; uniform float overcast;
-      uniform vec4 hole;
+      ${HOLES_GLSL}
       varying float vDepth; varying vec3 vWorld;
       #include <fog_pars_fragment>
       void main() {
         if (vDepth < -0.3) discard;
-        if (vWorld.x > hole.x && vWorld.x < hole.z && vWorld.z > hole.y && vWorld.z < hole.w) discard;
+        if (inHole(vWorld.xz)) discard;
         vec2 uv = vWorld.xz;
         vec3 n1 = texture2D(nmap, uv / 16.0 + vec2(time * 0.010, time * 0.007)).xyz * 2.0 - 1.0;
         vec3 n2 = texture2D(nmap, uv / 7.0 + vec2(-time * 0.013, time * 0.011)).xyz * 2.0 - 1.0;
@@ -494,7 +507,9 @@ function buildGrass(info, T) {
   });
   mesh.count = items.length;
   mesh.receiveShadow = true;
-  mesh.frustumCulled = false;
+  mesh.geometry.userData.own = true;
+  mesh.computeBoundingSphere();
+  if (mesh.boundingSphere) mesh.boundingSphere.radius += 2;   // room for the sway
   return mesh;
 }
 
@@ -559,12 +574,18 @@ async function buildObjects(info, onProgress) {
   return group;
 }
 
-// ---------------------------------------------------------------- region loading
-let region = null;
-let world = new THREE.Group();
-scene.add(world);
+// ---------------------------------------------------------------- places
+// Each place is built into its own group, a few frames at a time so nothing stalls, and handed to the
+// GPU before it's shown. Several can be loaded at once: Huginn's world flight loads the places ahead
+// of the raven, so arriving is only a swap. The active place (`region`) drives the labels, timeline,
+// weather and the isometric view, and the scene's origin is its centre (three (x, z) = (x - cx, cz - z)):
+// switching places shifts the groups and the raven, nothing is rebuilt.
+const places = new Map();   // slug -> place
+let region = null;          // the active place
+let world = null;           // its group
 let labelEls = [];
 let loadToken = 0;
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 
 function placeSun(c = region.center, r = region.extent) {
   const a = THREE.MathUtils.degToRad(SUN_ANGLE);
@@ -610,49 +631,122 @@ function findFocus(info, fallback) {
   return { focus, radius };
 }
 
-// fly: arriving on the wing (Huginn's world flight): the raven keeps its place in the world while the
-// scene re-centres on the new place, so it carries on flying without a jump
+function loadPlace(slug, onProgress) {
+  const had = places.get(slug);
+  if (had) { had.onProgress = onProgress; had.unwanted = false; return had.ready; }
+  const P = { slug, group: new THREE.Group(), done: false, onProgress };
+  places.set(slug, P);
+  P.ready = (async () => {
+    const [info, buf] = await Promise.all([
+      fetch(`assets/regions/${slug}.json`).then((r) => r.json()),
+      fetch(`assets/regions/${slug}.terrain.bin`).then((r) => r.arrayBuffer()),
+    ]);
+    await nextFrame();
+    const T = buildTerrain(info, buf);
+    const { focus, radius } = findFocus(info, T.center);
+    Object.assign(P, { info, T, extent: T.extent, center: T.center, focus, home: focus, buildRadius: radius,
+      sample: T.sample, skirt: T.skirt });
+    P.group.add(T.mesh, T.skirt, buildWater(info, T));
+    P.onProgress?.('Growing grass…');
+    await nextFrame();
+    P.group.add(buildGrass(info, T));
+    await nextFrame();
+    const objects = await buildObjects(info, (d, n) => P.onProgress?.(`Loading models ${d}/${n}…`));
+    P.group.add(objects);
+    P.timed = objects.userData.timed;
+    P.fires = buildFires(info, T);
+    P.fires.group.visible = night;
+    P.group.add(P.fires.group);
+    applyDayTo(P);
+    await nextFrame();
+    // compile its shaders now rather than in the first frame it's drawn in
+    try { await renderer.compileAsync(P.group, view(), scene); } catch { /* compiled on first draw instead */ }
+    if (places.get(slug) !== P) { disposePlace(P); throw new Error('unloaded'); }
+    P.done = true;
+    placePlace(P);
+    scene.add(P.group);
+    showPlaces();
+    return P;
+  })();
+  P.ready.catch(() => { if (places.get(slug) === P) places.delete(slug); });
+  return P.ready;
+}
+// a loaded place's group sits at its offset from the active place
+function placePlace(P) {
+  const o = (region || P).info.center;
+  P.group.position.set(P.info.center[0] - o[0], 0, o[1] - P.info.center[1]);
+  P.group.updateMatrixWorld(true);
+}
+function disposePlace(P) {
+  scene.remove(P.group);
+  P.group.traverse((o) => {
+    if (o.isInstancedMesh) { o.dispose(); if (o.geometry.userData.own) { o.geometry.dispose(); o.material.dispose(); } }
+    else if (o.isMesh || o.isSprite) {
+      if (!o.isSprite) o.geometry.dispose();
+      if (o.material !== wf.material) o.material.dispose?.();
+    }
+  });
+}
+function unloadPlace(P) {
+  if (P === region) return;
+  places.delete(P.slug);
+  if (P.done) disposePlace(P);   // one still loading is disposed when it finishes
+}
+// which loaded places are drawn: all of them while flying the world, only the active one otherwise
+function showPlaces() {
+  const all = worldActive();
+  for (const P of places.values()) {
+    if (!P.done) continue;
+    P.group.visible = all || P === region;
+    P.skirt.visible = !all;   // the diorama's earth walls would show between the world tiles
+  }
+  updateHoles();
+}
+// fly: arriving on the wing: the raven keeps its place in the world while the scene re-centres
+function activatePlace(P, { arrive = null, fly = false } = {}) {
+  const prev = region;
+  const keep = fly && prev && huginn.on ? ravenWorldPos() : null;
+  // how far everything in the scene moves when the origin goes from the old place to the new one
+  const shift = prev ? new THREE.Vector3(prev.info.center[0] - P.info.center[0], 0, P.info.center[1] - prev.info.center[1]) : null;
+  region = P;
+  world = P.group;
+  for (const Q of places.values()) if (Q.done) placePlace(Q);
+  P.focus = arrive ? new THREE.Vector3(arrive.pos[0], arrive.pos[1], arrive.pos[2]) : P.home;
+  weather.setRegion(P.T, P.info.water);
+  if (keep) {
+    setRavenWorldPos(keep);
+    resetView(undefined, true);
+    shiftWorld(shift);
+  } else {
+    placeSun();
+    // arriving through a portal: start close to the portal you came out of
+    resetView(arrive ? Math.max(1, (P.buildRadius * 0.9) / 30) : undefined, huginn.on);
+  }
+  buildLabels(P);
+  recentreWorld();
+  applyNight();
+  // every loaded place already shows the timeline's day; only the first place needs it applied
+  if (prev) { redrawShadows(); refreshWeather(); updateTimelineUI(); } else applyDay();
+  if (!worldActive()) for (const Q of [...places.values()]) if (Q !== P) unloadPlace(Q);
+  if (huginn.start) { huginn.start = false; toggleHuginn(true); }
+}
 async function loadRegion(slug, arrive, fly = false) {
   const token = ++loadToken;
-  $('loading').style.display = '';
-  $('loading').textContent = 'Loading terrain…';
-  const [info, buf] = await Promise.all([
-    fetch(`assets/regions/${slug}.json`).then((r) => r.json()),
-    fetch(`assets/regions/${slug}.terrain.bin`).then((r) => r.arrayBuffer()),
-  ]);
+  const pending = !places.get(slug)?.done;
+  if (pending) { $('loading').style.display = ''; $('loading').textContent = 'Loading terrain…'; }
+  let P;
+  try {
+    P = await loadPlace(slug, (t) => { if (token === loadToken) $('loading').textContent = t; });
+  } catch { return; }
   if (token !== loadToken) return;
-  const before = fly && region && huginn.on ? ravenWorldPos() : null;
-  scene.remove(world);
-  world = new THREE.Group();
-  scene.add(world);
-  const T = buildTerrain(info, buf);
-  const { focus, radius } = findFocus(info, T.center);
-  region = { info, extent: T.extent, center: T.center, focus, buildRadius: radius, sample: T.sample, T, skirt: T.skirt };
-  if (arrive) region.focus = new THREE.Vector3(arrive.pos[0], arrive.pos[1], arrive.pos[2]);
-  placeSun();
-  // arriving through a portal: start close to the portal you came out of
-  resetView(arrive ? Math.max(1, (region.buildRadius * 0.9) / 30) : undefined, !!before);
-  if (before) setRavenWorldPos(before);
-  if (huginn.start) { huginn.start = false; toggleHuginn(true); }
-  world.add(T.mesh, T.skirt, buildWater(info, T));
-  recentreWorld();
-  $('loading').textContent = 'Growing grass…';
-  await new Promise((r) => setTimeout(r, 0));
-  world.add(buildGrass(info, T));
-  const objects = await buildObjects(info, (d, n) => { $('loading').textContent = `Loading models ${d}/${n}…`; });
-  if (token !== loadToken) return;
-  world.add(objects);
-  region.timed = objects.userData.timed;
-  region.fires = buildFires(info, T);
-  weather.setRegion(T, info.water);
-  world.add(region.fires.group);
-  applyNight();
-  applyDay();
-
+  activatePlace(P, { arrive, fly });
+  $('loading').style.display = 'none';
+}
+function buildLabels(P) {
   const lbl = $('labels');
   lbl.innerHTML = '';
   labelKey = '';
-  labelEls = info.labels.map((L) => {
+  labelEls = P.info.labels.map((L) => {
     const el = document.createElement('div');
     const portal = L.kind.startsWith('portal');
     el.className = 'lbl' + (portal ? ' portal' : '') + (L.target ? ' link' : '');
@@ -661,29 +755,27 @@ async function loadRegion(slug, arrive, fly = false) {
     if (L.target) el.onclick = () => travel(L.target);
     lbl.appendChild(el);
     // the sign/portal piece itself, so the label follows the timeline
-    const obj = info.objects.find((o) => o[11] === 1 && Math.abs(o[1] - L.pos[0]) < 0.05 && Math.abs(o[3] - L.pos[2]) < 0.05);
+    const obj = P.info.objects.find((o) => o[11] === 1 && Math.abs(o[1] - L.pos[0]) < 0.05 && Math.abs(o[3] - L.pos[2]) < 0.05);
     return { el, portal, obj, target: L.target, base: new THREE.Vector3(L.pos[0], L.pos[1] + 1.6, L.pos[2]),
              pos: new THREE.Vector3(L.pos[0], L.pos[1] + (portal ? 4 : 2.2), L.pos[2]) };
   });
-  $('loading').style.display = 'none';
 }
 
 // ---------------------------------------------------------------- timelapse
 const ZERO = new THREE.Matrix4().makeScale(0, 0, 0).elements;
 function visibleOn(o, d) { return o[11] !== 1 || o.length < 14 || (o[12] <= d && d <= o[13]); }
-function regionDay() {
+function regionDay(P = region) {
   // the region's dates may lag the index's (a place exported before the latest snapshot)
-  const dates = region?.info.dates || [];
+  const dates = P?.info.dates || [];
   if (!dates.length) return 0;
   const want = index.dates[dayIdx ?? index.dates.length - 1];
   let k = 0;
   dates.forEach((dd, i) => { if (dd <= want) k = i; });
   return k;
 }
-function applyDay() {
-  if (!region || !region.timed) return;
-  const d = regionDay();
-  for (const im of region.timed) {
+function applyDayTo(P) {
+  const d = regionDay(P);
+  for (const im of P.timed || []) {
     const arr = im.instanceMatrix.array, src = im.userData.mats;
     im.userData.items.forEach((o, k) => {
       if (visibleOn(o, d)) arr.set(src.subarray(k * 16, k * 16 + 16), k * 16);
@@ -691,8 +783,12 @@ function applyDay() {
     });
     im.instanceMatrix.needsUpdate = true;
   }
+  for (const f of P.fires?.items || []) f.on = visibleOn(f.o, d);
+}
+function applyDay() {
+  if (!region) return;
+  for (const P of places.values()) if (P.done) applyDayTo(P);
   redrawShadows();
-  for (const f of region.fires?.items || []) f.on = visibleOn(f.o, d);
   refreshWeather();
   updateWorldState();
   drawFog();
@@ -928,16 +1024,32 @@ function buildFires(info, T) {
     group.add(flame, pool);
     items.push({ o, flame, pool, phase: Math.random() * 10, on: true, pos: flame.position });
   }
-  // a few real lights on the fires nearest the middle of the place, so walls catch the glow
-  const lights = [];
-  const near = [...items].sort((a, b) => a.pos.distanceTo(region.focus) - b.pos.distanceTo(region.focus)).slice(0, 8);
-  for (const it of near) {
-    const L = new THREE.PointLight(0xff9a4a, 0, 22, 1.6);
-    L.position.copy(it.pos);
-    it.light = L;
-    lights.push(L);
+  return { group, items };
+}
+// a few real lights on the fires nearest the view, so walls catch the glow. Always the same eight
+// lights moved between fires: a changing number of lights would recompile every shader in the scene.
+const fireLights = Array.from({ length: 8 }, () => new THREE.PointLight(0xff9a4a, 0, 22, 1.6));
+let fireLightsAt = 0;
+function assignFireLights(now) {
+  if (now - fireLightsAt < 500) return;
+  fireLightsAt = now;
+  const at = huginn.on ? raven.position : region?.focus;
+  if (!at) return;
+  const all = [];
+  for (const P of places.values()) {
+    if (!P.done || !P.group.visible) continue;
+    for (const f of P.fires.items) {
+      if (!f.on) continue;
+      const w = new THREE.Vector3().copy(f.pos).add(P.group.position);
+      all.push([w.distanceToSquared(at), f, w]);
+    }
   }
-  return { group, items, lights };
+  all.sort((a, b) => a[0] - b[0]);
+  fireLights.forEach((L, i) => {
+    const e = all[i];
+    L.userData.fire = e ? e[1] : null;
+    if (e) L.position.copy(e[2]);
+  });
 }
 // day/night and the weather together; cheap enough to run every frame (lightning)
 const tint = new THREE.Color();
@@ -969,22 +1081,27 @@ function applyNight() {
   renderer.toneMappingExposure = night ? 1.25 : 1.05;
   $('night').textContent = night ? '\u2600' : '\u263E';
   $('night').title = night ? 'Day' : 'Night';
-  if (!region || !region.fires) return;
-  region.fires.group.visible = night;
-  for (const L of region.fires.lights) {
-    if (night && !L.parent) world.add(L);
+  for (const P of places.values()) if (P.fires) P.fires.group.visible = night;
+  for (const L of fireLights) {
+    if (night && !L.parent) scene.add(L);
     if (!night && L.parent) L.parent.remove(L);
   }
+  fireLightsAt = 0;
 }
 function animateFires(t) {
-  if (!night || !region?.fires) return;
-  for (const f of region.fires.items) {
-    const k = 0.82 + 0.12 * Math.sin(t * 9 + f.phase) + 0.08 * Math.sin(t * 23 + f.phase * 3);
-    f.flame.visible = f.pool.visible = f.on;
-    f.flame.material.opacity = k;
-    f.pool.material.opacity = 0.5 * k;
-    if (f.light) f.light.intensity = f.on ? 55 * k : 0;
+  if (!night) return;
+  assignFireLights(performance.now());
+  for (const P of places.values()) {
+    if (!P.done || !P.group.visible) continue;
+    for (const f of P.fires.items) {
+      const k = 0.82 + 0.12 * Math.sin(t * 9 + f.phase) + 0.08 * Math.sin(t * 23 + f.phase * 3);
+      f.flame.visible = f.pool.visible = f.on;
+      f.flame.material.opacity = k;
+      f.pool.material.opacity = 0.5 * k;
+      f.k = k;
+    }
   }
+  for (const L of fireLights) L.intensity = L.userData.fire?.on ? 55 * L.userData.fire.k : 0;
 }
 
 function updateLabels() {
@@ -1149,9 +1266,11 @@ function declutterMarkers() {
 // with the tiles cut away beneath it, and the scene re-centres on it, so you can fly from base to base.
 // Scene coordinates stay relative to the current place's centre: three (x, z) = (x - cx, cz - z).
 const VIEW = MOBILE ? 1300 : 2200;      // m: how far tiles load (fog hides the edge)
+const PRELOAD = MOBILE ? 500 : 900;     // m from a place's edge at which it starts loading in detail
+const MAX_PLACES = MOBILE ? 2 : 4;      // detailed places kept loaded at once while flying
 const wf = { meta: null, loading: null, group: new THREE.Group(), tiles: new Map(), material: null, water: null,
   waterAt: null, waterDirty: 0, shadowAt: null, next: 0, inflight: 0, switching: false, lights: [], lightMats: null,
-  hole: { value: new THREE.Vector4(1e9, 1e9, -1e9, -1e9) } };
+  ...newHoles() };
 wf.group.visible = false;
 scene.add(wf.group);
 const worldActive = () => huginn.on && !!wf.meta && !!region;
@@ -1173,7 +1292,7 @@ function ensureWorld() {
   wf.loading ||= fetch('assets/world/tiles.json').then((r) => (r.ok ? r.json() : null)).catch(() => null).then((meta) => {
     if (!meta) return;
     wf.meta = meta;
-    wf.material = terrainMaterial(meta.water, { hole: wf.hole });
+    wf.material = terrainMaterial(meta.water, wf);
     // the torches and campfires out in the wild glow where they stand
     const glow = (c) => new THREE.SpriteMaterial({ map: glowTexture(), color: c, transparent: true, depthWrite: false,
       blending: THREE.AdditiveBlending });
@@ -1191,18 +1310,39 @@ function ensureWorld() {
   });
   return wf.loading;
 }
-// after a place loads (or flight starts): move the tiles to the new origin and cut the hole for the place
+// when the active place changes or flight starts/ends: move the tiles to the origin, show what belongs
 function recentreWorld() {
   if (!region) return;
   const on = worldActive();
-  const [cx, cz] = region.info.center, T = region.T, inset = 2;
+  const [cx, cz] = region.info.center;
   wf.group.position.set(-cx, 0, cz);
   wf.group.visible = on;
-  wf.hole.value.set(T.cx - T.W / 2 + inset, T.cz - T.D / 2 + inset, T.cx + T.W / 2 - inset, T.cz + T.D / 2 - inset);
-  if (region.skirt) region.skirt.visible = !on;   // the diorama's earth walls would show between the tiles
   if (wf.water) wf.water.visible = on;
-  wf.waterAt = wf.shadowAt = null;
-  if (!on) placeSun();
+  showPlaces();
+  if (!on) { wf.waterAt = wf.shadowAt = null; placeSun(); }
+}
+// cut a hole in the tiles and sea for every detailed place on show
+function updateHoles() {
+  let n = 0;
+  for (const P of places.values()) {
+    if (!P.done || !P.group.visible || n >= MAX_HOLES) continue;
+    const T = P.T, o = P.group.position, inset = 2;
+    wf.holes.value[n++].set(o.x + T.cx - T.W / 2 + inset, o.z + T.cz - T.D / 2 + inset, o.x + T.cx + T.W / 2 - inset, o.z + T.cz + T.D / 2 - inset);
+  }
+  wf.holeCount.value = n;
+}
+// the origin moved (a new active place while flying): carry along what lives in scene coordinates
+function shiftWorld(d) {
+  if (!d) return;
+  if (wf.water) { wf.water.position.add(d); wf.water.updateMatrixWorld(); }
+  if (wf.waterAt) wf.waterAt.add(new THREE.Vector2(d.x, d.z));
+  if (wf.shadowAt) wf.shadowAt.add(d);
+  // the sun and its shadow map move with the scene, so the shadows stay valid
+  sun.position.add(d);
+  sun.target.position.add(d);
+  sun.target.updateMatrixWorld();
+  sun.updateMatrixWorld();
+  redrawShadows();
 }
 async function loadTile(t) {
   const [tx, tz] = t, key = tileKey(tx, tz), m = wf.meta;
@@ -1241,7 +1381,7 @@ function rebuildWorldWater() {
   const x = raven.position.x, z = raven.position.z, S = VIEW * 2.2;
   if (wf.water) { scene.remove(wf.water); wf.water.geometry.dispose(); wf.water.material.dispose(); }
   const T = { W: S, D: S, cx: Math.round(x / 16) * 16, cz: Math.round(z / 16) * 16, sample: (px, pz) => groundAt(px, pz) };
-  wf.water = buildWater({ water: wf.meta.water }, T, 16, wf.hole);
+  wf.water = buildWater({ water: wf.meta.water }, T, 16, wf);
   scene.add(wf.water);
   wf.waterAt = new THREE.Vector2(x, z);
   wf.waterDirty = 0;
@@ -1274,14 +1414,29 @@ function updateWorld(now) {
   for (const { sp } of wf.lights) sp.material.visible = night;   // like the fires in a place: lit at night
   // a place comes in at full detail once you're over it (k < 1: inside its radius). The current one
   // stays unless you've left it or are clearly nearer the middle of another, so edges don't flicker.
-  if (!wf.switching) {
-    let best = null, curK = Infinity;
-    for (const r of index.regions) {
-      const k = Math.hypot(r.x - p.x, r.z - p.z) / (r.radius || 150);
-      if (r.slug === current) curK = k;
-      if (!best || k < best.k) best = { r, k };
-    }
-    if (best && best.k < 1 && best.r.slug !== current && (curK > 1 || best.k < curK * 0.7)) {
+  let best = null, curK = Infinity;
+  const near = [];
+  for (const r of index.regions) {
+    const d = Math.hypot(r.x - p.x, r.z - p.z), k = d / (r.radius || 150);
+    if (r.slug === current) curK = k;
+    if (!best || k < best.k) best = { r, k };
+    near.push([d - (r.radius || 150), r]);
+  }
+  // places within reach load in the background, nearest first, one at a time; far ones are let go
+  near.sort((a, b) => a[0] - b[0]);
+  const wanted = new Set(near.filter(([d]) => d < PRELOAD).slice(0, MAX_PLACES).map(([, r]) => r.slug));
+  wanted.add(current);
+  if (wf.jumpTo) wanted.add(wf.jumpTo);   // a portal's far side, loading while the flash is up
+  for (const P of [...places.values()]) if (!wanted.has(P.slug) && P !== region) unloadPlace(P);
+  if (![...places.values()].some((P) => !P.done)) {
+    const next = [...wanted].find((slug) => !places.has(slug));
+    if (next) loadPlace(next).catch(() => {});
+  }
+  // a place becomes the active one once you're over it (k < 1: inside its radius). The current one
+  // stays unless you've left it or are clearly nearer the middle of another, so edges don't flicker.
+  if (!wf.switching && !wf.jumpTo && best && best.k < 1 && best.r.slug !== current && (curK > 1 || best.k < curK * 0.7)) {
+    const P = places.get(best.r.slug);
+    if (P?.done) {
       wf.switching = true;
       setPlace(best.r.slug, null, true).finally(() => { wf.switching = false; });
     }
@@ -1293,8 +1448,11 @@ const _v = new THREE.Vector3(), _f = new THREE.Vector3(), _r = new THREE.Vector3
 const UP = new THREE.Vector3(0, 1, 0);
 // ground height at scene (x, z): the place in detail, else the world tiles, else nothing known
 function groundAt(x, z) {
-  const T = region.T;
-  if (Math.abs(x - T.cx) < T.W / 2 && Math.abs(z - T.cz) < T.D / 2) return T.sample(x, z);
+  for (const P of places.values()) {
+    if (!P.done || (P !== region && !P.group.visible)) continue;
+    const T = P.T, lx = x - P.group.position.x, lz = z - P.group.position.z;
+    if (Math.abs(lx - T.cx) < T.W / 2 && Math.abs(lz - T.cz) < T.D / 2) return T.sample(lx, lz);
+  }
   if (wf.meta) {
     const [cx, cz] = region.info.center, vx = x + cx, vz = cz - z;
     const t = tileAt(vx, vz);
@@ -1453,7 +1611,11 @@ function toggleHuginn(force) {
     const T = region.T, out = Math.abs(raven.position.x - T.cx) > T.W / 2 + 50 || Math.abs(raven.position.z - T.cz) > T.D / 2 + 50;
     if (out) resetView(); else landRaven();
   }
-  if (on) ensureWorld().then(recentreWorld); else recentreWorld();
+  if (on) ensureWorld().then(recentreWorld);
+  else {
+    for (const P of [...places.values()]) if (P !== region) unloadPlace(P);
+    recentreWorld();
+  }
   controls.enabled = !on;
   huginn.keys.clear();
   huginn.stick.x = huginn.stick.y = 0;
@@ -1523,12 +1685,42 @@ function setupHuginn() {
 
 // ---------------------------------------------------------------- portal travel
 function travel(target) {
+  if (worldActive()) { jumpThrough(target); return; }
   const fx = $('flash');
   fx.classList.add('on');
   setTimeout(() => {
     setPlace(target.slug, target);
     setTimeout(() => fx.classList.remove('on'), 350);
   }, 280);
+}
+
+// flying through a portal: a flash, and you come out in front of the partner portal, still flying
+async function jumpThrough(target) {
+  if (wf.jumpTo) return;
+  const fx = $('flash');
+  fx.classList.add('on');
+  wf.jumpTo = target.slug;
+  const t0 = performance.now();
+  const P = await loadPlace(target.slug, (t) => { $('loading').style.display = ''; $('loading').textContent = t; }).catch(() => null);
+  $('loading').style.display = 'none';
+  if (P) {
+    await new Promise((r) => setTimeout(r, Math.max(0, 280 - (performance.now() - t0))));
+    const yaw = huginn.yaw;
+    await setPlace(target.slug, target);   // already loaded: activates at once
+    // a few metres back from the portal and a little above it, looking at it
+    const at = new THREE.Vector3(target.pos[0], target.pos[1], target.pos[2]);
+    huginn.yaw = yaw; huginn.pitch = -0.25;
+    aimRaven();
+    raven.getWorldDirection(_v);
+    raven.position.copy(at).addScaledVector(_v.setY(0).normalize(), -16).setY(at.y + 7);
+    huginn.vel.set(0, 0, 0);
+    clampRaven();
+    raven.updateMatrixWorld();
+    wf.waterAt = wf.shadowAt = null;
+    wf.next = 0;
+  }
+  wf.jumpTo = null;
+  setTimeout(() => fx.classList.remove('on'), 350);
 }
 
 // clicking (not dragging) on or near a linked portal model takes you through it
