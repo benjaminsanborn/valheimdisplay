@@ -1272,14 +1272,16 @@ function updateWorld(now) {
     wf.shadowAt = look.clone();
   }
   for (const { sp } of wf.lights) sp.material.visible = night;   // like the fires in a place: lit at night
-  // the nearest place comes in at full detail once you're well inside it
+  // a place comes in at full detail once you're over it (k < 1: inside its radius). The current one
+  // stays unless you've left it or are clearly nearer the middle of another, so edges don't flicker.
   if (!wf.switching) {
-    let best = null;
+    let best = null, curK = Infinity;
     for (const r of index.regions) {
       const k = Math.hypot(r.x - p.x, r.z - p.z) / (r.radius || 150);
+      if (r.slug === current) curK = k;
       if (!best || k < best.k) best = { r, k };
     }
-    if (best && best.k < 0.75 && best.r.slug !== current) {
+    if (best && best.k < 1 && best.r.slug !== current && (curK > 1 || best.k < curK * 0.7)) {
       wf.switching = true;
       setPlace(best.r.slug, null, true).finally(() => { wf.switching = false; });
     }
