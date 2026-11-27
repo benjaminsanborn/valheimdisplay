@@ -84,16 +84,132 @@ const AIR = {
   vfWispN: { value: 0 },
   vfGlow: { value: 0.35 },
   vfTime: { value: 0 },      // seconds, for the snowstorms' drift
+  // the highest the fog reaches anywhere around the eye (m): rays are only marched below it. Over the
+  // meadows that's a few dozen metres, not the 700 the tallest fog bank needs.
+  vfTopMax: { value: 700 },
 };
 const AIR_STEPS = MOBILE ? 10 : 20;
 const MAX_WISPS = MOBILE ? 8 : 24;
 const WISP_R = 24;   // how far a wisp torch pushes the mist back, in metres (the game's own reach)
+// the air's shader code: its uniforms, and the march through it (airFog). Alpha-tested foliage (grass,
+// leaf cards) layers many surfaces over each pixel, so it marches per vertex instead (AIR_VERTEX) and
+// the fragments only apply the result: the fog barely changes across a blade or a leaf.
+const AIR_UNIFORMS = `
+  uniform float vfOn; uniform sampler2D vfColor; uniform sampler2D vfTop; uniform vec2 vfOrigin; uniform vec3 vfLight; uniform float vfTopMax;
+  uniform vec4 vfWisp[${MAX_WISPS}]; uniform int vfWispN; uniform float vfGlow; uniform sampler2D vfMask;
+  vec2 airUV(vec3 p) { return vec2(p.x + vfOrigin.x + 10500.0, vfOrigin.y - p.z + 10500.0) / 21000.0; }
+`;
+const AIR_MARCH = `
+  uniform float vfTime;
+  float vfHash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+  float vfNoise(vec3 x) {
+    vec3 i = floor(x), f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(vfHash(i), vfHash(i + vec3(1, 0, 0)), f.x), mix(vfHash(i + vec3(0, 1, 0)), vfHash(i + vec3(1, 1, 0)), f.x), f.y),
+               mix(mix(vfHash(i + vec3(0, 0, 1)), vfHash(i + vec3(1, 0, 1)), f.x), mix(vfHash(i + vec3(0, 1, 1)), vfHash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+  }
+  // a snowstorm: clouds of blown snow racing over the mountains, coming and going in gusts
+  float vfStorm(vec3 p, float dt) {
+    vec3 w = vec3(p.x + vfOrigin.x, p.y, vfOrigin.y - p.z);
+    vec3 q = w * vec3(0.012, 0.03, 0.012) + vec3(-vfTime * 0.3, vfTime * 0.04, -vfTime * 0.1);
+    float n = vfNoise(q) * 0.6 + vfNoise(q * 2.4 + 7.1) * 0.4;
+    float gust = 0.5 + 0.5 * sin(vfTime * 0.35 + w.x * 0.0025 + w.z * 0.0017);
+    // marching in long steps the gusts would only be grain: far off, a storm is an even haze
+    return mix(smoothstep(0.35, 0.75, n), 0.3, smoothstep(25.0, 90.0, dt)) * (0.35 + 0.65 * gust);
+  }
+  float airT = 1.0;   // how much of what's behind shows through, from the last airFog
+  vec3 airFog(vec3 col, vec3 wp) {
+    const float TOP_MAX = 700.0, R = 10500.0;
+    vec3 ro = cameraPosition;
+    // overhead (orthographic): every line of sight runs along the view direction
+    if (isOrthographic) ro = wp + vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]) * 1500.0;
+    vec3 rd = wp - ro;
+    float len = length(rd);
+    rd /= max(len, 1e-4);
+    // only the stretch of the ray below the highest fog
+    float t0 = 0.0, t1 = len;
+    if (ro.y > vfTopMax) { if (rd.y > -1e-4) return col; t0 = (ro.y - vfTopMax) / -rd.y; }
+    if (rd.y > 1e-4) t1 = min(len, (vfTopMax - ro.y) / rd.y);
+    if (t1 <= t0) return col;
+    // a sample every ~10 m of fog crossed, up to AIR_STEPS: the grass and trees close by need only a few
+    int n = clamp(int(ceil((t1 - t0) / 10.0)), 3, ${AIR_STEPS});
+    float dt = (t1 - t0) / float(n);
+    // interleaved gradient noise: offsets that vary smoothly across neighbouring pixels read as an even
+    // dither, where white noise would show as grain in dense fog
+    #ifdef AIR_VS
+      float jitter = 0.5;
+    #else
+      float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    #endif
+    // which wisp torches' bubbles this ray passes through at all (most rays: none)
+    int hit = 0;
+    for (int j = 0; j < ${MAX_WISPS}; j++) {
+      if (j >= vfWispN) break;
+      vec3 oc = ro - vfWisp[j].xyz;
+      float b = dot(oc, rd), hh = b * b - dot(oc, oc) + ${WISP_R}.0 * ${WISP_R}.0;
+      if (hh > 0.0 && -b + sqrt(hh) > t0 && -b - sqrt(hh) < t1) hit |= 1 << j;
+    }
+    float T = 1.0; vec3 acc = vec3(0.0), em = vec3(0.0);
+    for (int i = 0; i < ${AIR_STEPS}; i++) {
+      if (i >= n) break;
+      float ta = t0 + float(i) * dt, tb = ta + dt;
+      vec3 p = ro + rd * (t0 + (float(i) + jitter) * dt);
+      vec2 uv = airUV(p);
+      vec3 sh = textureLod(vfTop, uv, 0.0).rgb;    // top, snowstorm, how gradually it thins
+      float h = clamp((sh.r * TOP_MAX - p.y) / max(6.0, sh.b * 300.0), 0.0, 1.0);
+      if (h <= 0.0) continue;                      // above the fog here
+      vec4 c = textureLod(vfColor, uv, 0.0);
+      float d = c.a * 0.03 * h;
+      vec3 fc = c.rgb;
+      if (sh.g > 0.02 && h > 0.0) {
+        float ds = vfStorm(p, dt) * sh.g * h * 0.03;
+        fc = (fc * d + vec3(0.93, 0.95, 1.0) * ds) / max(d + ds, 1e-6);
+        d += ds;
+      }
+      if (d > 0.0 && hit != 0) {
+        // each wisp torch clears a sphere of the mist: where this step of the ray runs inside one is
+        // found exactly (the samples are metres apart), so its edge is sharp. Its surface, where the mist
+        // stops, glows faintly, brightest where the ray grazes it, so the bubble reads as an outline.
+        float inside = 0.0, rim = 0.0;
+        for (int j = 0; j < ${MAX_WISPS}; j++) {
+          if (j >= vfWispN) break;
+          if ((hit & (1 << j)) == 0) continue;
+          vec3 oc = ro - vfWisp[j].xyz;
+          float b = dot(oc, rd), hh = b * b - dot(oc, oc) + ${WISP_R}.0 * ${WISP_R}.0;
+          float sq = sqrt(hh), ia = -b - sq, ib = -b + sq;
+          inside = max(inside, max(0.0, min(tb, ib) - max(ta, ia)));
+          float w = min(${WISP_R}.0 / max(sq, 0.5), 8.0);
+          if (ia >= ta && ia < tb) rim += w;
+          if (ib >= ta && ib < tb) rim += w;
+        }
+        em += T * vec3(0.55, 0.8, 1.0) * rim * min(d * 60.0, 1.0) * (0.12 + 0.2 * vfGlow);
+        d *= 1.0 - inside / dt;
+      }
+      float a = 1.0 - exp(-d * dt);
+      acc += T * a * fc;
+      T *= 1.0 - a;
+      if (T < 0.01) break;
+    }
+    airT = T;
+    return col * T + acc * vfLight + em;
+  }
+`;
 THREE.ShaderChunk.fog_pars_vertex = `#ifdef USE_FOG
   varying float vFogDepth; varying vec3 vFogWorld;
+  #ifdef AIR_VERTEX
+    #define AIR_VS
+    varying vec4 vAir;
+    ${AIR_UNIFORMS}
+    ${AIR_MARCH}
+  #endif
 #endif`;
 THREE.ShaderChunk.fog_vertex = `#ifdef USE_FOG
   vFogDepth = - mvPosition.z;
   vFogWorld = (inverse(viewMatrix) * vec4(mvPosition.xyz, 1.0)).xyz;
+  #ifdef AIR_VERTEX
+    vAir = vec4(0.0, 0.0, 0.0, 1.0);
+    if (vfOn > 0.5) { vAir.rgb = airFog(vec3(0.0), vFogWorld); vAir.a = airT; }
+  #endif
 #endif`;
 THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
   uniform vec3 fogColor;
@@ -103,9 +219,7 @@ THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
   #else
     uniform float fogNear; uniform float fogFar;
   #endif
-  uniform float vfOn; uniform sampler2D vfColor; uniform sampler2D vfTop; uniform vec2 vfOrigin; uniform vec3 vfLight;
-  uniform vec4 vfWisp[${MAX_WISPS}]; uniform int vfWispN; uniform float vfGlow; uniform sampler2D vfMask;
-  vec2 airUV(vec3 p) { return vec2(p.x + vfOrigin.x + 10500.0, vfOrigin.y - p.z + 10500.0) / 21000.0; }
+  ${AIR_UNIFORMS}
   // past the edge of the explored world nothing shows: anything below the top of the fog bank is fog
   float airPast(vec3 wp) {
     return (1.0 - smoothstep(0.15, 0.45, textureLod(vfMask, airUV(wp), 0.0).r)) * smoothstep(900.0, 550.0, wp.y);
@@ -125,88 +239,12 @@ THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
     }
     return vec3(0.45, 0.75, 1.0) * (min(g, 1.5) * vfGlow + min(ring, 1.0) * (0.25 + 0.5 * vfGlow));
   }
-  uniform float vfTime;
-  float vfHash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
-  float vfNoise(vec3 x) {
-    vec3 i = floor(x), f = fract(x);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(mix(vfHash(i), vfHash(i + vec3(1, 0, 0)), f.x), mix(vfHash(i + vec3(0, 1, 0)), vfHash(i + vec3(1, 1, 0)), f.x), f.y),
-               mix(mix(vfHash(i + vec3(0, 0, 1)), vfHash(i + vec3(1, 0, 1)), f.x), mix(vfHash(i + vec3(0, 1, 1)), vfHash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
-  }
-  // a snowstorm: clouds of blown snow racing over the mountains, coming and going in gusts
-  float vfStorm(vec3 p, float dt) {
-    vec3 w = vec3(p.x + vfOrigin.x, p.y, vfOrigin.y - p.z);
-    vec3 q = w * vec3(0.012, 0.03, 0.012) + vec3(-vfTime * 0.3, vfTime * 0.04, -vfTime * 0.1);
-    float n = vfNoise(q) * 0.6 + vfNoise(q * 2.4 + 7.1) * 0.4;
-    float gust = 0.5 + 0.5 * sin(vfTime * 0.35 + w.x * 0.0025 + w.z * 0.0017);
-    // marching in long steps the gusts would only be grain: far off, a storm is an even haze
-    return mix(smoothstep(0.35, 0.75, n), 0.3, smoothstep(25.0, 90.0, dt)) * (0.35 + 0.65 * gust);
-  }
-  vec3 airFog(vec3 col, vec3 wp) {
-    const float TOP_MAX = 700.0, R = 10500.0;
-    vec3 ro = cameraPosition;
-    // overhead (orthographic): every line of sight runs along the view direction
-    if (isOrthographic) ro = wp + vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]) * 1500.0;
-    vec3 rd = wp - ro;
-    float len = length(rd);
-    rd /= max(len, 1e-4);
-    // only the stretch of the ray below the highest fog
-    float t0 = 0.0, t1 = len;
-    if (ro.y > TOP_MAX) { if (rd.y > -1e-4) return col; t0 = (ro.y - TOP_MAX) / -rd.y; }
-    if (rd.y > 1e-4) t1 = min(len, (TOP_MAX - ro.y) / rd.y);
-    if (t1 <= t0) return col;
-    float dt = (t1 - t0) / float(${AIR_STEPS});
-    // interleaved gradient noise: offsets that vary smoothly across neighbouring pixels read as an even
-    // dither, where white noise would show as grain in dense fog
-    float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-    // each wisp torch clears a sphere of the mist: where the ray runs inside one, found exactly rather than
-    // by the samples (they're metres apart), so its edge is sharp. Its surface, where the mist stops,
-    // glows faintly, brightest where the ray grazes it, so the bubble reads as an outline in the mist.
-    vec2 wiv[${MAX_WISPS}]; float wrim[${MAX_WISPS}];
-    for (int j = 0; j < ${MAX_WISPS}; j++) {
-      wiv[j] = vec2(1e9, -1e9); wrim[j] = 0.0;
-      if (j >= vfWispN) continue;
-      vec3 oc = ro - vfWisp[j].xyz;
-      float b = dot(oc, rd), hh = b * b - dot(oc, oc) + ${WISP_R}.0 * ${WISP_R}.0;
-      if (hh <= 0.0) continue;
-      float s = sqrt(hh);
-      wiv[j] = vec2(-b - s, -b + s);
-      wrim[j] = min(${WISP_R}.0 / max(s, 0.5), 8.0);
-    }
-    float T = 1.0; vec3 acc = vec3(0.0), em = vec3(0.0);
-    for (int i = 0; i < ${AIR_STEPS}; i++) {
-      float ta = t0 + float(i) * dt, tb = ta + dt;
-      vec3 p = ro + rd * (t0 + (float(i) + jitter) * dt);
-      vec2 uv = airUV(p);
-      vec4 c = textureLod(vfColor, uv, 0.0);
-      vec3 sh = textureLod(vfTop, uv, 0.0).rgb;    // top, snowstorm, how gradually it thins
-      float h = clamp((sh.r * TOP_MAX - p.y) / max(6.0, sh.b * 300.0), 0.0, 1.0);
-      float d = c.a * 0.03 * h;
-      vec3 fc = c.rgb;
-      if (sh.g > 0.02 && h > 0.0) {
-        float ds = vfStorm(p, dt) * sh.g * h * 0.03;
-        fc = (fc * d + vec3(0.93, 0.95, 1.0) * ds) / max(d + ds, 1e-6);
-        d += ds;
-      }
-      if (d > 0.0 && vfWispN > 0) {
-        float inside = 0.0, rim = 0.0;
-        for (int j = 0; j < ${MAX_WISPS}; j++) {
-          if (j >= vfWispN) break;
-          vec2 iv = wiv[j];
-          inside = max(inside, max(0.0, min(tb, iv.y) - max(ta, iv.x)));
-          if (iv.x >= ta && iv.x < tb) rim += wrim[j];
-          if (iv.y >= ta && iv.y < tb) rim += wrim[j];
-        }
-        em += T * vec3(0.55, 0.8, 1.0) * rim * min(d * 60.0, 1.0) * (0.12 + 0.2 * vfGlow);
-        d *= 1.0 - inside / dt;
-      }
-      float a = 1.0 - exp(-d * dt);
-      acc += T * a * fc;
-      T *= 1.0 - a;
-      if (T < 0.01) break;
-    }
-    return col * T + acc * vfLight + em;
-  }
+  #ifdef AIR_VERTEX
+    varying vec4 vAir;
+    vec3 airFog(vec3 col, vec3 wp) { return col * vAir.a + vAir.rgb; }
+  #else
+    ${AIR_MARCH}
+  #endif
 #endif`;
 THREE.ShaderChunk.fog_fragment = `#ifdef USE_FOG
   #ifdef FOG_EXP2
@@ -260,6 +298,7 @@ function airFog(mat) {
   if (mat.userData.air) return mat;
   mat.userData.air = true;
   if (mat.isShaderMaterial) { Object.assign(mat.uniforms, AIR); return mat; }
+  if (mat.alphaTest > 0) mat.defines = { ...(mat.defines || {}), AIR_VERTEX: '' };
   const prev = mat.onBeforeCompile;
   mat.onBeforeCompile = function (sh, r) { prev?.call(this, sh, r); Object.assign(sh.uniforms, AIR); };
   return mat;
@@ -1502,6 +1541,27 @@ function readMask(img) {
   for (let i = 0; i < a.length; i++) a[i] = d[i * 4];
   return { a, n: c.width };
 }
+// the fog's top (atmosphere_top.png's red, 0..700 m) as the highest per 16 x 16 pixel cell (~330 m),
+// over explored land only: the tall bank past the edge is the wall, drawn by airWall/airPast
+function topGrid(img, reach) {
+  const m = readMask(img), C = 16, G = Math.ceil(m.n / C), g = new Float32Array(G * G);
+  for (let j = 0; j < m.n; j++) for (let i = 0; i < m.n; i++) {
+    if (reach && reach.n === m.n && reach.a[j * m.n + i] < 128) continue;
+    const k = Math.floor(j / C) * G + Math.floor(i / C);
+    g[k] = Math.max(g[k], m.a[j * m.n + i] / 255 * 700);
+  }
+  return { g, G, cell: 21000 / G };
+}
+// the highest fog within reach of the eye (the view distance and a cell more)
+function topNear(x, z) {
+  const T = wf.topGrid;
+  if (!T) return 700;
+  const ci = Math.floor((x + 10500) / T.cell), cj = Math.floor((10500 - z) / T.cell), r = Math.ceil(VIEW / T.cell) + 1;
+  let top = 0;
+  for (let j = Math.max(0, cj - r); j <= Math.min(T.G - 1, cj + r); j++)
+    for (let i = Math.max(0, ci - r); i <= Math.min(T.G - 1, ci + r); i++) top = Math.max(top, T.g[j * T.G + i]);
+  return top + 4;
+}
 function reachable(x, z) {
   const m = wf.reach;
   if (!m) return true;
@@ -1531,6 +1591,7 @@ function ensureWorld() {
     Promise.all(['atmosphere.png', 'atmosphere_top.png', 'explored.png'].map((f) => texLoader.loadAsync(`assets/world/${f}`))).then(([c, t, e]) => {
       AIR.vfMask.value = e;
       wf.reach = readMask(e.image);
+      wf.topGrid = topGrid(t.image, wf.reach);
       for (const x of [c, t, e]) { x.generateMipmaps = false; x.minFilter = x.magFilter = THREE.LinearFilter; x.wrapS = x.wrapT = THREE.ClampToEdgeWrapping; }
       c.colorSpace = THREE.SRGBColorSpace;
       AIR.vfColor.value = c; AIR.vfTop.value = t; AIR.vfOn.value = 1;
@@ -1616,7 +1677,7 @@ async function loadTile(t) {
 function unloadTile(key) {
   const e = wf.tiles.get(key);
   wf.tiles.delete(key);
-  unloadWild(e);
+  unloadWild(e, key);
   if (!e?.mesh) return;
   wf.group.remove(e.mesh);
   e.mesh.geometry.dispose();
@@ -1696,11 +1757,13 @@ function updateWisps(now) {
   if (now < wispsAt || !region) return;
   wispsAt = now + 300;
   const all = index.wisps || [], d = viewDay(), [cx, cz] = region.info.center, e = eye();
+  AIR.vfTopMax.value = topNear(e.x + cx, cz - e.z);
+  // only torches close enough to see their clearing: each one costs every pixel some work
   const near = [];
   for (const w of all) {
     if (w[3] > d) continue;
-    const x = w[0] - cx, z = cz - w[2];
-    near.push([Math.hypot(x - e.x, z - e.z), x, w[1], z]);
+    const x = w[0] - cx, z = cz - w[2], dist = Math.hypot(x - e.x, z - e.z);
+    if (dist < 700) near.push([dist, x, w[1], z]);
   }
   near.sort((a, b) => a[0] - b[0]);
   const n = Math.min(MAX_WISPS, near.length);
@@ -1908,20 +1971,31 @@ async function loadWild(t, entry) {
   if (im.boundingSphere) im.boundingSphere.radius += 40;   // the quads stand up from the points
   entry.wild = { n, model, pos, quat, scale, im };
   wf.group.add(im);
-  wild.dirty = true;
+  if (nearTile(tileKey(tx, tz))) wild.dirty = true;
 }
-function unloadWild(entry) {
+function unloadWild(entry, key) {
   if (!entry?.wild) return;
   wf.group.remove(entry.wild.im);
   entry.wild.im.geometry.dispose();
   entry.wild.im.dispose();
   entry.wild = null;
-  wild.dirty = true;
+  if (!key || nearTile(key)) wild.dirty = true;
+}
+// does tile `key` reach within NEAR of where the near models were last placed? (tiles further out only
+// add far stand-ins, so the near models and the shadows don't need redoing for them)
+function nearTile(key) {
+  const at = wild.at;
+  if (!at) return true;
+  const [tx, tz] = key.split('_').map(Number), T = wf.meta.tile, x0 = tx * T - 32, z0 = -(tz * T - 32 + T);
+  const dx = Math.max(x0 - at.x, 0, at.x - (x0 + T)), dz = Math.max(z0 - at.z, 0, at.z - (z0 + T));
+  return dx * dx + dz * dz <= (NEAR + 40) * (NEAR + 40);
 }
 // the real models within NEAR of the raven
 function updateNearWild() {
   const at = new THREE.Vector3().copy(eye()).sub(wf.group.position);
   if (!wild.dirty && wild.at && Math.hypot(at.x - wild.at.x, at.z - wild.at.z) < 40) return;
+  // moving only swaps models at the edge of NEAR, beyond the shadowed square (placeSun redraws as it moves)
+  const changed = wild.dirty;
   wild.dirty = false;
   wild.at = at;
   if (wild.mat) wild.mat.uniforms.uNearAt.value.copy(at);
@@ -1967,7 +2041,7 @@ function updateNearWild() {
     }
     for (const im of meshes) { im.count = count; im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere(); }
   }
-  redrawShadows();
+  if (changed) redrawShadows();
 }
 
 // ---------------------------------------------------------------- Huginn flight
@@ -2482,8 +2556,28 @@ window.addEventListener('resize', () => {
 let lastInput = performance.now(), lastFrame = 0, labelKey = '';
 for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'touchstart'])
   window.addEventListener(ev, () => { lastInput = performance.now(); }, { passive: true });
+// resolution follows the frame rate: when frames fall well behind the display's refresh the render
+// resolution steps down (towards 1 pixel per CSS pixel), and back up when there's room again
+const res = { max: renderer.getPixelRatio(), last: 0, times: [], at: 0, hold: 0 };
+function adaptResolution(now) {
+  if (res.last && now - res.last < 250 && !document.hidden) res.times.push(now - res.last);
+  res.last = now;
+  if (now < res.at || res.times.length < 40) return;
+  res.at = now + 1500;
+  const t = res.times.sort((a, b) => a - b), refresh = t[Math.floor(t.length * 0.05)], med = t[Math.floor(t.length / 2)];
+  res.times = [];
+  const r = renderer.getPixelRatio(), lo = Math.min(1, res.max);
+  let next = r;
+  if (med > Math.max(refresh * 1.4, 19) && r > lo) next = Math.max(lo, r - 0.25);
+  else if (med < refresh * 1.1 && r < res.max && now > res.hold) next = Math.min(res.max, r + 0.25);
+  if (next === r) return;
+  if (next < r) res.hold = now + 20000;   // after stepping down, wait a while before trying higher again
+  renderer.setPixelRatio(next);
+  labelKey = '';
+}
 function loop(now) {
   requestAnimationFrame(loop);
+  adaptResolution(now);
   const idle = now - lastInput > 30000;
   const flying = huginn.keys.size || huginn.stick.x || huginn.stick.y || huginn.gyro;
   const fps = idle && !flying ? 15 : MOBILE ? 30 : 60;
