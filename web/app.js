@@ -1005,7 +1005,7 @@ function layoutGlobe() {
 
 // ---- zooming into the enlarged globe (pinch on touch, wheel on desktop, drag to pan)
 const gz = { zoom: 1, x: 0, y: 0 };
-const GZ_MAX = 8;
+const GZ_MAX = 32;   // the map image softens past ~8x, but torches and trails stay sharp
 function zoomGlobe(zoom, fx, fy) {
   // fx, fy: focal point in px from the disc centre; the map point under it stays put
   const size = $('disc').getBoundingClientRect().width;
