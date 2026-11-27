@@ -42,6 +42,7 @@ if need:
 run_tool('export_icons', GAME, 'web/assets/icons')
 run_tool('export_worldmap', 'data/world', 'web/assets/worldmap.png', 1024)
 run_tool('export_worldmap', 'data/world', 'web/assets/worldmap_hi.webp', 4096)   # loaded when the big map opens
+run_tool('export_world', 'data/world', 'web/assets')   # low-detail terrain everywhere explored, for flying between places
 
 # link portals: each portal label gets the place + spot its partner (same tag) is in
 portals = []
@@ -72,7 +73,7 @@ for r in regions:
 
 meta = vworld.read_meta('data/world')
 idx = dict(world=meta.name, seed=meta.seed_name,
-           radius=10500, regions=[dict(slug=r['slug'], title=r['title'], x=r['x'], z=r['z']) for r in regions if os.path.exists(f"web/assets/regions/{r['slug']}.json")])
+           radius=10500, regions=[dict(slug=r['slug'], title=r['title'], x=r['x'], z=r['z'], radius=r['radius']) for r in regions if os.path.exists(f"web/assets/regions/{r['slug']}.json")])
 # timelapse: history dates and the day each zone was first explored
 hist = json.load(open('data/history/built.json'))
 zones = json.load(open('data/history/zones.json'))

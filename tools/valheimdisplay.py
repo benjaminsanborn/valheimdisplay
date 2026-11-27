@@ -404,7 +404,7 @@ def main():
     cmd = rest[0] if rest else 'serve'
     if cmd == 'selftest':   # the packaged program has everything it needs
         import numpy, scipy.ndimage, scipy.spatial, PIL.Image, UnityPy, texture2ddecoder, etcpak  # noqa: F401
-        import export_models, export_region, history, places, players, terrain  # noqa: F401
+        import export_models, export_region, export_world, history, places, players, terrain  # noqa: F401
         assert os.path.isfile(bundled('web', 'index.html')) and os.path.isfile(bundled('web', 'vendor', 'three', 'build', 'three.module.min.js'))
         print(f'ok: numpy {numpy.__version__}, UnityPy {UnityPy.__version__}')
         return

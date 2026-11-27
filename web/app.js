@@ -144,10 +144,29 @@ function loadModel(name) {
 }
 
 // ---------------------------------------------------------------- terrain
-function terrainMaterial(waterLevel) {
+// tile: the low-detail world terrain around places (Huginn mode): `hole` is where the detailed place is
+// drawn instead, and unexplored ground is greyed out like the map's fog of war
+function terrainMaterial(waterLevel, tile = null) {
   const mat = new THREE.MeshStandardMaterial({ roughness: 1, metalness: 0 });
+  mat.customProgramCacheKey = () => (tile ? 'terrain-tile' : 'terrain');
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.waterLevel = { value: waterLevel };
+    if (tile) {
+      sh.uniforms.hole = tile.hole;
+      sh.vertexShader = sh.vertexShader
+        .replace('#include <common>', `#include <common>
+          attribute float explored; varying float vExp; varying vec2 vWorldXZ;`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+          vExp = explored; vWorldXZ = (modelMatrix * vec4(transformed, 1.0)).xz;`);
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <common>', `#include <common>
+          uniform vec4 hole; varying float vExp; varying vec2 vWorldXZ;`)
+        .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
+          if (vWorldXZ.x > hole.x && vWorldXZ.x < hole.z && vWorldXZ.y > hole.y && vWorldXZ.y < hole.w) discard;`)
+        .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+          float grey = dot(diffuseColor.rgb, vec3(0.3, 0.59, 0.11));
+          diffuseColor.rgb = mix(vec3(grey) * vec3(0.42, 0.45, 0.52), diffuseColor.rgb, vExp);`);
+    }
     sh.uniforms.layers = { value: shared.layers };
     sh.uniforms.tints = { value: LAYER_TINT.map((c) => new THREE.Vector3(...c)) };
     sh.vertexShader = sh.vertexShader
@@ -182,7 +201,7 @@ function terrainMaterial(waterLevel) {
   return mat;
 }
 
-function buildTerrain(info, buf) {
+function buildTerrain(info, buf, tile = null) {
   const { w, d, x0, z0, step } = info.grid;
   const n = w * d;
   const heights = new Float32Array(buf, 0, n);
@@ -218,6 +237,20 @@ function buildTerrain(info, buf) {
   g.setAttribute('variation', new THREE.BufferAttribute(variation, 1, true));
   g.setIndex(new THREE.BufferAttribute(idx, 1));
   g.computeVertexNormals();
+  const sample = (x, z) => {   // bilinear terrain height at three.js (x, z)
+    const fi = (x - x0) / step, fj = (-z - z0) / step;
+    const i = Math.max(0, Math.min(w - 2, Math.floor(fi))), j = Math.max(0, Math.min(d - 2, Math.floor(fj)));
+    const u = Math.min(1, Math.max(0, fi - i)), v = Math.min(1, Math.max(0, fj - j));
+    const h = (a, b) => heights[(j + b) * w + i + a];
+    return (h(0, 0) * (1 - u) + h(1, 0) * u) * (1 - v) + (h(0, 1) * (1 - u) + h(1, 1) * u) * v;
+  };
+  if (tile) {
+    g.setAttribute('explored', new THREE.BufferAttribute(new Uint8Array(buf, n * 17, n), 1, true));
+    g.computeBoundingSphere();
+    const mesh = new THREE.Mesh(g, tile.material);
+    mesh.receiveShadow = true;
+    return { mesh, sample };
+  }
   const mesh = new THREE.Mesh(g, terrainMaterial(info.water));
   mesh.receiveShadow = true;
   mesh.castShadow = true;
@@ -264,19 +297,12 @@ function buildTerrain(info, buf) {
   bottom.rotation.x = Math.PI / 2;
   bottom.position.set(cx, floorY, cz);
   group.add(bottom);
-  const sample = (x, z) => {   // bilinear terrain height at three.js (x, z)
-    const fi = (x - x0) / step, fj = (-z - z0) / step;
-    const i = Math.max(0, Math.min(w - 2, Math.floor(fi))), j = Math.max(0, Math.min(d - 2, Math.floor(fj)));
-    const u = Math.min(1, Math.max(0, fi - i)), v = Math.min(1, Math.max(0, fj - j));
-    const h = (a, b) => heights[(j + b) * w + i + a];
-    return (h(0, 0) * (1 - u) + h(1, 0) * u) * (1 - v) + (h(0, 1) * (1 - u) + h(1, 1) * u) * v;
-  };
   return { mesh, skirt: group, heights, weights, variation, extent: Math.max(W, D), center: new THREE.Vector3(cx, info.water, cz), sample, W, D, cx, cz };
 }
 
 // ---------------------------------------------------------------- water
-function buildWater(info, T) {
-  const step = 2;
+const NO_HOLE = { value: new THREE.Vector4(1e9, 1e9, -1e9, -1e9) };
+function buildWater(info, T, step = 2, hole = NO_HOLE) {
   const nx = Math.ceil(T.W / step) + 1, nz = Math.ceil(T.D / step) + 1;
   const g = new THREE.PlaneGeometry(T.W, T.D, nx - 1, nz - 1);
   g.rotateX(-Math.PI / 2);
@@ -291,7 +317,7 @@ function buildWater(info, T) {
     depthWrite: false,
     fog: true,
     uniforms: { ...THREE.UniformsUtils.clone(THREE.UniformsLib.fog), time: timeUniform, nmap: { value: shared.nmap },
-      foam: { value: shared.foam }, sunDir: { value: sunDir }, night: nightUniform, overcast: overcastUniform },
+      foam: { value: shared.foam }, sunDir: { value: sunDir }, night: nightUniform, overcast: overcastUniform, hole },
     vertexShader: `
       attribute float depth;
       varying float vDepth; varying vec3 vWorld;
@@ -306,10 +332,12 @@ function buildWater(info, T) {
       }`,
     fragmentShader: `
       uniform float time; uniform sampler2D nmap; uniform sampler2D foam; uniform vec3 sunDir; uniform float night; uniform float overcast;
+      uniform vec4 hole;
       varying float vDepth; varying vec3 vWorld;
       #include <fog_pars_fragment>
       void main() {
         if (vDepth < -0.3) discard;
+        if (vWorld.x > hole.x && vWorld.x < hole.z && vWorld.z > hole.y && vWorld.z < hole.w) discard;
         vec2 uv = vWorld.xz;
         vec3 n1 = texture2D(nmap, uv / 16.0 + vec2(time * 0.010, time * 0.007)).xyz * 2.0 - 1.0;
         vec3 n2 = texture2D(nmap, uv / 7.0 + vec2(-time * 0.013, time * 0.011)).xyz * 2.0 - 1.0;
@@ -538,9 +566,8 @@ scene.add(world);
 let labelEls = [];
 let loadToken = 0;
 
-function placeSun() {
+function placeSun(c = region.center, r = region.extent) {
   const a = THREE.MathUtils.degToRad(SUN_ANGLE);
-  const r = region.extent, c = region.center;
   sun.position.set(c.x + Math.cos(a) * r, c.y + r * 0.9, c.z + Math.sin(a) * r);
   sun.target.position.copy(c);
   sun.target.updateMatrixWorld();
@@ -550,7 +577,7 @@ function placeSun() {
   redrawShadows();
 }
 
-function resetView(zoom) {
+function resetView(zoom, keepRaven = false) {
   const c = region.focus;
   camera.position.copy(c).addScaledVector(new THREE.Vector3(1, 0.9, 1).normalize(), 780);
   camera.lookAt(c);
@@ -559,7 +586,7 @@ function resetView(zoom) {
   setFrustum();
   controls.target.copy(c);
   controls.update();
-  if (huginn.on) perchRaven();
+  if (huginn.on && !keepRaven) perchRaven();
 }
 
 function findFocus(info, fallback) {
@@ -583,7 +610,9 @@ function findFocus(info, fallback) {
   return { focus, radius };
 }
 
-async function loadRegion(slug, arrive) {
+// fly: arriving on the wing (Huginn's world flight): the raven keeps its place in the world while the
+// scene re-centres on the new place, so it carries on flying without a jump
+async function loadRegion(slug, arrive, fly = false) {
   const token = ++loadToken;
   $('loading').style.display = '';
   $('loading').textContent = 'Loading terrain…';
@@ -592,18 +621,21 @@ async function loadRegion(slug, arrive) {
     fetch(`assets/regions/${slug}.terrain.bin`).then((r) => r.arrayBuffer()),
   ]);
   if (token !== loadToken) return;
+  const before = fly && region && huginn.on ? ravenWorldPos() : null;
   scene.remove(world);
   world = new THREE.Group();
   scene.add(world);
   const T = buildTerrain(info, buf);
   const { focus, radius } = findFocus(info, T.center);
-  region = { info, extent: T.extent, center: T.center, focus, buildRadius: radius, sample: T.sample, T };
+  region = { info, extent: T.extent, center: T.center, focus, buildRadius: radius, sample: T.sample, T, skirt: T.skirt };
   if (arrive) region.focus = new THREE.Vector3(arrive.pos[0], arrive.pos[1], arrive.pos[2]);
   placeSun();
   // arriving through a portal: start close to the portal you came out of
-  resetView(arrive ? Math.max(1, (region.buildRadius * 0.9) / 30) : undefined);
+  resetView(arrive ? Math.max(1, (region.buildRadius * 0.9) / 30) : undefined, !!before);
+  if (before) setRavenWorldPos(before);
   if (huginn.start) { huginn.start = false; toggleHuginn(true); }
   world.add(T.mesh, T.skirt, buildWater(info, T));
+  recentreWorld();
   $('loading').textContent = 'Growing grass…';
   await new Promise((r) => setTimeout(r, 0));
   world.add(buildGrass(info, T));
@@ -1111,18 +1143,177 @@ function declutterMarkers() {
   });
 }
 
+// ---------------------------------------------------------------- Huginn's world flight
+// While flying, the explored world around the current place is drawn from low-detail 512 m tiles
+// (tools/export_world.py) that stream in around the raven. The nearest place is loaded in full detail
+// with the tiles cut away beneath it, and the scene re-centres on it, so you can fly from base to base.
+// Scene coordinates stay relative to the current place's centre: three (x, z) = (x - cx, cz - z).
+const VIEW = MOBILE ? 1300 : 2200;      // m: how far tiles load (fog hides the edge)
+const wf = { meta: null, loading: null, group: new THREE.Group(), tiles: new Map(), material: null, water: null,
+  waterAt: null, waterDirty: 0, shadowAt: null, next: 0, inflight: 0, switching: false, lights: [], lightMats: null,
+  hole: { value: new THREE.Vector4(1e9, 1e9, -1e9, -1e9) } };
+wf.group.visible = false;
+scene.add(wf.group);
+const worldActive = () => huginn.on && !!wf.meta && !!region;
+function ravenWorldPos() {
+  const [cx, cz] = region.info.center;
+  return { x: raven.position.x + cx, y: raven.position.y, z: cz - raven.position.z };
+}
+function setRavenWorldPos(p) {
+  const [cx, cz] = region.info.center;
+  raven.position.set(p.x - cx, p.y, cz - p.z);
+  raven.updateMatrixWorld();
+}
+const tileKey = (tx, tz) => `${tx}_${tz}`;
+function tileAt(vx, vz) {
+  const t = wf.meta.tile;
+  return wf.tiles.get(tileKey(Math.floor((vx + 32) / t), Math.floor((vz + 32) / t)));
+}
+function ensureWorld() {
+  wf.loading ||= fetch('assets/world/tiles.json').then((r) => (r.ok ? r.json() : null)).catch(() => null).then((meta) => {
+    if (!meta) return;
+    wf.meta = meta;
+    wf.material = terrainMaterial(meta.water, { hole: wf.hole });
+    // the torches and campfires out in the wild glow where they stand
+    const glow = (c) => new THREE.SpriteMaterial({ map: glowTexture(), color: c, transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending });
+    wf.lightMats = { wisp: glow(0x9fd8ff), torch: glow(0xffffff), fire: glow(0xffffff) };
+    for (const L of index.lights || []) {
+      const sp = new THREE.Sprite(wf.lightMats[L.kind]);
+      sp.scale.setScalar(L.kind === 'fire' ? 6 : 4);
+      sp.position.set(L.x, 0, -L.z);
+      sp.visible = false;
+      sp.renderOrder = 4;
+      wf.group.add(sp);
+      wf.lights.push({ L, sp });
+    }
+    recentreWorld();
+  });
+  return wf.loading;
+}
+// after a place loads (or flight starts): move the tiles to the new origin and cut the hole for the place
+function recentreWorld() {
+  if (!region) return;
+  const on = worldActive();
+  const [cx, cz] = region.info.center, T = region.T, inset = 2;
+  wf.group.position.set(-cx, 0, cz);
+  wf.group.visible = on;
+  wf.hole.value.set(T.cx - T.W / 2 + inset, T.cz - T.D / 2 + inset, T.cx + T.W / 2 - inset, T.cz + T.D / 2 - inset);
+  if (region.skirt) region.skirt.visible = !on;   // the diorama's earth walls would show between the tiles
+  if (wf.water) wf.water.visible = on;
+  wf.waterAt = wf.shadowAt = null;
+  if (!on) placeSun();
+}
+async function loadTile(t) {
+  const [tx, tz] = t, key = tileKey(tx, tz), m = wf.meta;
+  const entry = { state: 'loading' };
+  wf.tiles.set(key, entry);
+  wf.inflight++;
+  try {
+    const buf = await fetch(`assets/world/${key}.bin?v=${t[2]}`).then((r) => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); });
+    if (wf.tiles.get(key) !== entry) return;      // unloaded while it was on its way
+    const info = { grid: { w: m.n, d: m.n, x0: tx * m.tile - 32, z0: tz * m.tile - 32, step: m.step }, water: m.water };
+    const T = buildTerrain(info, buf, { material: wf.material });
+    Object.assign(entry, { state: 'ready', mesh: T.mesh, sample: T.sample });
+    wf.group.add(T.mesh);
+    for (const { L, sp } of wf.lights) {
+      if (tileAt(L.x, L.z) !== entry) continue;
+      sp.position.y = T.sample(L.x, -L.z) + (L.kind === 'fire' ? 1.2 : 2.2);
+      sp.visible = true;
+    }
+    wf.waterDirty = performance.now();
+  } catch {
+    entry.state = 'failed';
+  } finally {
+    wf.inflight--;
+  }
+}
+function unloadTile(key) {
+  const e = wf.tiles.get(key);
+  wf.tiles.delete(key);
+  if (!e?.mesh) return;
+  wf.group.remove(e.mesh);
+  e.mesh.geometry.dispose();
+  for (const { L, sp } of wf.lights) if (tileKey(Math.floor((L.x + 32) / wf.meta.tile), Math.floor((L.z + 32) / wf.meta.tile)) === key) sp.visible = false;
+}
+// the sea: one big sheet centred under the raven, rebuilt as it travels or as land loads in
+function rebuildWorldWater() {
+  const x = raven.position.x, z = raven.position.z, S = VIEW * 2.2;
+  if (wf.water) { scene.remove(wf.water); wf.water.geometry.dispose(); wf.water.material.dispose(); }
+  const T = { W: S, D: S, cx: Math.round(x / 16) * 16, cz: Math.round(z / 16) * 16, sample: (px, pz) => groundAt(px, pz) };
+  wf.water = buildWater({ water: wf.meta.water }, T, 16, wf.hole);
+  scene.add(wf.water);
+  wf.waterAt = new THREE.Vector2(x, z);
+  wf.waterDirty = 0;
+}
+function updateWorld(now) {
+  if (!worldActive() || now < wf.next) return;
+  wf.next = now + 250;
+  const p = ravenWorldPos(), m = wf.meta, half = m.tile / 2;
+  // tiles in reach, nearest first; far ones go
+  const want = [];
+  for (const t of m.tiles) {
+    const d = Math.hypot(t[0] * m.tile - 32 + half - p.x, t[1] * m.tile - 32 + half - p.z) - half * Math.SQRT2;
+    const key = tileKey(t[0], t[1]);
+    if (d < VIEW) { if (!wf.tiles.has(key)) want.push([d, t]); }
+    else if (d > VIEW + 700 && wf.tiles.has(key)) unloadTile(key);
+  }
+  want.sort((a, b) => a[0] - b[0]);
+  for (const [, t] of want.slice(0, Math.max(0, 4 - wf.inflight))) loadTile(t);
+  // the sea follows the raven
+  const moved = wf.waterAt ? Math.hypot(raven.position.x - wf.waterAt.x, raven.position.z - wf.waterAt.y) : Infinity;
+  if (moved > VIEW * 0.35 || (wf.waterDirty && now - wf.waterDirty > 1500)) rebuildWorldWater();
+  // shadows: a 600 m square around where the raven is looking
+  raven.getWorldDirection(_v);
+  const look = _f.copy(raven.position).addScaledVector(_v.setY(0).normalize(), 120);
+  look.y = Math.max(groundAt(look.x, look.z), m.water);
+  if (!wf.shadowAt || wf.shadowAt.distanceTo(look) > 60) {
+    placeSun(look, 420);
+    wf.shadowAt = look.clone();
+  }
+  for (const { sp } of wf.lights) sp.material.visible = night;   // like the fires in a place: lit at night
+  // the nearest place comes in at full detail once you're well inside it
+  if (!wf.switching) {
+    let best = null;
+    for (const r of index.regions) {
+      const k = Math.hypot(r.x - p.x, r.z - p.z) / (r.radius || 150);
+      if (!best || k < best.k) best = { r, k };
+    }
+    if (best && best.k < 0.75 && best.r.slug !== current) {
+      wf.switching = true;
+      setPlace(best.r.slug, null, true).finally(() => { wf.switching = false; });
+    }
+  }
+}
+
 // ---------------------------------------------------------------- Huginn flight
 const _v = new THREE.Vector3(), _f = new THREE.Vector3(), _r = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
-// lowest the raven may fly at (x, z): over the ground, the water, and the edge skirt
-function floorAt(x, z) {
+// ground height at scene (x, z): the place in detail, else the world tiles, else nothing known
+function groundAt(x, z) {
   const T = region.T;
-  const inside = Math.abs(x - T.cx) < T.W / 2 && Math.abs(z - T.cz) < T.D / 2;
-  return Math.max(inside ? T.sample(x, z) : -1e9, region.info.water) + 1.6;
+  if (Math.abs(x - T.cx) < T.W / 2 && Math.abs(z - T.cz) < T.D / 2) return T.sample(x, z);
+  if (wf.meta) {
+    const [cx, cz] = region.info.center, vx = x + cx, vz = cz - z;
+    const t = tileAt(vx, vz);
+    if (t?.sample) return t.sample(vx, -vz);
+  }
+  return -1e9;
+}
+// lowest the raven may fly at (x, z): over the ground and the water
+function floorAt(x, z) {
+  return Math.max(groundAt(x, z), region.info.water) + 1.6;
 }
 function clampRaven() {
   if (!region) return;
   const p = raven.position, T = region.T, m = 40;
+  if (worldActive()) {
+    // anywhere in the world, up to the edge
+    const w = ravenWorldPos(), r = Math.hypot(w.x, w.z), R = 10400;
+    if (r > R) setRavenWorldPos({ x: w.x * R / r, y: w.y, z: w.z * R / r });
+    p.y = THREE.MathUtils.clamp(p.y, floorAt(p.x, p.z), 1500);
+    return;
+  }
   p.x = THREE.MathUtils.clamp(p.x, T.cx - T.W / 2 - m, T.cx + T.W / 2 + m);
   p.z = THREE.MathUtils.clamp(p.z, T.cz - T.D / 2 - m, T.cz + T.D / 2 + m);
   p.y = THREE.MathUtils.clamp(p.y, floorAt(p.x, p.z), region.center.y + region.extent * 1.2);
@@ -1254,7 +1445,13 @@ function toggleHuginn(force) {
   const on = force ?? !huginn.on;
   if (on === huginn.on || !region) return;
   huginn.on = on;
-  if (on) perchRaven(); else landRaven();
+  if (on) perchRaven();
+  else {
+    // landing out in the wild: back to the place's usual view
+    const T = region.T, out = Math.abs(raven.position.x - T.cx) > T.W / 2 + 50 || Math.abs(raven.position.z - T.cz) > T.D / 2 + 50;
+    if (out) resetView(); else landRaven();
+  }
+  if (on) ensureWorld().then(recentreWorld); else recentreWorld();
   controls.enabled = !on;
   huginn.keys.clear();
   huginn.stick.x = huginn.stick.y = 0;
@@ -1360,7 +1557,7 @@ renderer.domElement.addEventListener('pointermove', (e) => {
   for (const x of labelEls) x.el.classList.toggle('hot', x === L);
 });
 
-function setPlace(slug, arrive) {
+function setPlace(slug, arrive, fly = false) {
   current = slug;
   const r = index.regions.find((x) => x.slug === slug);
   document.querySelectorAll('.mk').forEach((m) => m.classList.toggle('on', m.dataset.slug === slug));
@@ -1368,7 +1565,7 @@ function setPlace(slug, arrive) {
   const u = new URL(location.href);
   u.searchParams.set('place', slug);
   history.replaceState(null, '', u);
-  loadRegion(slug, arrive);
+  return loadRegion(slug, arrive, fly);
 }
 
 let hiMap = false;
@@ -1558,9 +1755,14 @@ function loop(now) {
   const dt = Math.min(clock.getDelta(), 0.1);
   timeUniform.value = clock.elapsedTime;
   animateFires(timeUniform.value);
-  if (huginn.on) flyRaven(dt);
+  if (huginn.on) { flyRaven(dt); updateWorld(now); }
   else controls.update();
   weather.update(timeUniform.value, dt, view(), controls.target, orthoSize);
+  if (worldActive()) {
+    const f = scene.fog, far = VIEW * 0.95;
+    if (f.far > far) { f.far = far; f.near = Math.min(f.near, far * 0.4); }
+    if (!weather.state.p.fog) f.color.copy(scene.background);
+  }
   if (weather.state.p.lightning) applyLighting();
   renderer.render(scene, view());
   // labels only move when the camera, timeline or globe does
