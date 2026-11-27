@@ -1640,7 +1640,7 @@ function rebuildWorldWater() {
 const MARK_FAR = MOBILE ? 900 : 1500;
 let marks = null;
 function buildMarkers() {
-  const box = $('markers');
+  const box = $('marks3d');
   marks = [];
   const add = (x, z, icon, name, found, cls) => {
     const el = document.createElement('div');
@@ -2025,12 +2025,15 @@ function perchRaven() {
   const c = controls.target;
   _f.subVectors(c, camera.position).normalize();
   huginn.yaw = Math.atan2(-_f.x, -_f.z);
-  huginn.pitch = -0.6;
+  huginn.pitch = -0.8;
   const hh = orthoSize / camera.zoom;
-  const d = THREE.MathUtils.clamp(hh / Math.tan(THREE.MathUtils.degToRad(raven.fov / 2)), 12, 400);
+  const d = THREE.MathUtils.clamp(2.2 * hh / Math.tan(THREE.MathUtils.degToRad(raven.fov / 2)), 120, 800);
   aimRaven();
   raven.getWorldDirection(_v);
   raven.position.copy(c).addScaledVector(_v, -d);
+  // well clear of the treetops, whatever the ground does under the start
+  const p = raven.position, floor = Math.max(groundAt(p.x, p.z), region.info.water) + 110;
+  if (p.y < floor) p.y = floor;
   huginn.vel.set(0, 0, 0);
   clampRaven();
   raven.updateMatrixWorld();
