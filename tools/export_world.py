@@ -16,7 +16,8 @@ The trees and rocks the world save holds for each tile (outside places, which dr
 The model names are added to needed_models.txt so the build exports them.
 
 The atmosphere over the whole world, for the viewer's volumetric fog: <out>/world/atmosphere.png (RGB fog
-colour, A density) and atmosphere_top.png (how high the fog reaches, 0..700 m). Each biome has its own
+colour, A density) and atmosphere_top.png (how high the fog reaches, 0..700 m; how much snowstorm; how
+gradually the fog thins towards its top, 0..300 m). Each biome has its own
 air (mist filling the Mistlands valleys, haze over swamps...), unexplored land a tall dense bank, and
 everything is blurred so you pass gradually from one into the next. explored.png is the edge of the
 explored world (1 inside, 0 past it), where the viewer walls the world off.
@@ -69,15 +70,22 @@ def weights(wg, wxs, wzs, hgt):
     return wts
 
 
-# per biome: fog colour (sRGB), density (fraction of the densest fog, 0.03 /m) and how high it reaches (m)
+# per biome: fog colour (sRGB), density (fraction of the densest fog, 0.03 /m), how high it reaches, how
+# gradually it thins towards that height (m), and snowstorm (0..1). The height is either absolute or, for
+# ('ground', m), that far over the land: the Mistlands' mist lies over valleys and hills alike, as in the
+# game, and the mountains' snowstorms hug their slopes.
 SEA = WATER_LEVEL
-AIR = {terrain.MEADOWS: ((0.78, 0.83, 0.88), 0.012, SEA + 40), terrain.BLACKFOREST: ((0.55, 0.63, 0.56), 0.05, SEA + 45),
-       terrain.SWAMP: ((0.47, 0.52, 0.36), 0.13, SEA + 28), terrain.MOUNTAIN: ((0.86, 0.89, 0.96), 0.03, 600),
-       terrain.PLAINS: ((0.86, 0.79, 0.62), 0.02, SEA + 50), terrain.OCEAN: ((0.72, 0.79, 0.86), 0.015, SEA + 30),
-       terrain.MISTLANDS: ((0.73, 0.71, 0.83), 0.18, SEA + 75), terrain.ASHLANDS: ((0.56, 0.32, 0.24), 0.13, SEA + 90),
-       terrain.DEEPNORTH: ((0.9, 0.93, 1.0), 0.09, SEA + 120)}
-UNEXPLORED = ((0.64, 0.67, 0.73), 1.0, 650.0)
-TOP_MAX = 700.0
+AIR = {terrain.MEADOWS: ((0.78, 0.83, 0.88), 0.012, SEA + 40, 16, 0),
+       terrain.BLACKFOREST: ((0.55, 0.63, 0.56), 0.05, SEA + 45, 18, 0),
+       terrain.SWAMP: ((0.47, 0.52, 0.36), 0.13, SEA + 28, 8, 0),
+       terrain.MOUNTAIN: ((0.86, 0.89, 0.96), 0.04, ('ground', 120), 70, 1.0),
+       terrain.PLAINS: ((0.86, 0.79, 0.62), 0.02, SEA + 50, 20, 0),
+       terrain.OCEAN: ((0.72, 0.79, 0.86), 0.015, SEA + 30, 8, 0),
+       terrain.MISTLANDS: ((0.73, 0.71, 0.83), 0.85, ('ground', 45), 22, 0),
+       terrain.ASHLANDS: ((0.56, 0.32, 0.24), 0.13, SEA + 90, 36, 0),
+       terrain.DEEPNORTH: ((0.9, 0.93, 1.0), 0.09, ('ground', 100), 60, 0.6)}
+UNEXPLORED = ((0.64, 0.67, 0.73), 1.0, 650.0, 250.0)
+TOP_MAX, FADE_MAX = 700.0, 300.0
 
 
 def reach_of(explored_zones):
@@ -94,29 +102,41 @@ def atmosphere(wg, explored_zones, folder, N=1024, R=10500.0):
     c = (np.arange(N) + 0.5) / N * 2 * R - R
     X, Z = np.meshgrid(c, -c)                     # row 0 = north, like the world map
     b = np.zeros((N, N), dtype=np.int32)
+    ground = np.zeros((N, N))
     for i in range(0, N, 64):
         b[i:i + 64] = wg.biome(X[i:i + 64], Z[i:i + 64])
+        ground[i:i + 64] = wg.height(X[i:i + 64], Z[i:i + 64])
+    # the land under the air, with its peaks spread a little so air that hugs it covers them too
+    ground = gaussian_filter(maximum_filter(np.maximum(ground, SEA), size=5), 1.5)
     col, dens, top = np.zeros((N, N, 3)), np.zeros((N, N)), np.zeros((N, N))
-    for k, (cc, d, t) in AIR.items():
+    fade, storm = np.zeros((N, N)), np.zeros((N, N))
+    for k, (cc, d, t, f, st) in AIR.items():
         m = b == k
-        col[m], dens[m], top[m] = cc, d, t
+        col[m], dens[m], fade[m], storm[m] = cc, d, f, st
+        top[m] = ground[m] + t[1] if isinstance(t, tuple) else t
     # blur so the air changes gradually; colour weighted by density, so thick fog colours its edges
     sig = 6.0                                     # ~120 m
     wd = gaussian_filter(dens, sig) + 1e-6
     col = np.stack([gaussian_filter(col[..., i] * dens, sig) for i in range(3)], -1) / wd[..., None]
     top = gaussian_filter(top * dens, sig) / wd
+    fade = gaussian_filter(fade * dens, sig) / wd
+    storm = gaussian_filter(storm, sig)
     dens = wd
     # the unexplored bank starts a zone or two beyond the explored land, rather than bleeding into it
     exp = reach_at(reach_of(explored_zones), X, Z)
     # the same edge on its own, for the viewer to wall off what's past it
     Image.fromarray((exp * 255).astype(np.uint8), 'L').save(os.path.join(folder, 'explored.png'), optimize=True)
-    uc, ud, ut = UNEXPLORED
+    uc, ud, ut, uf = UNEXPLORED
     col = col * exp[..., None] + np.array(uc) * (1 - exp[..., None])
     dens = dens * exp + ud * (1 - exp)
     top = top * exp + ut * (1 - exp)
+    fade = fade * exp + uf * (1 - exp)
+    storm = storm * exp
     rgba = np.dstack([np.clip(col, 0, 1) * 255, np.clip(dens, 0, 1) * 255]).astype(np.uint8)
     Image.fromarray(rgba, 'RGBA').save(os.path.join(folder, 'atmosphere.png'), optimize=True)
-    Image.fromarray((np.clip(top / TOP_MAX, 0, 1) * 255).astype(np.uint8), 'L').save(os.path.join(folder, 'atmosphere_top.png'), optimize=True)
+    # R: top (/ TOP_MAX), G: snowstorm, B: how gradually it thins (/ FADE_MAX)
+    shape = np.dstack([np.clip(top / TOP_MAX, 0, 1), np.clip(storm, 0, 1), np.clip(fade / FADE_MAX, 0, 1)])
+    Image.fromarray((shape * 255).astype(np.uint8), 'RGB').save(os.path.join(folder, 'atmosphere_top.png'), optimize=True)
 
 
 def place_rects():

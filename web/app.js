@@ -82,6 +82,7 @@ const AIR = {
   vfWisp: { value: Array.from({ length: MOBILE ? 8 : 24 }, () => new THREE.Vector4()) },
   vfWispN: { value: 0 },
   vfGlow: { value: 0.35 },
+  vfTime: { value: 0 },      // seconds, for the snowstorms' drift
 };
 const AIR_STEPS = MOBILE ? 10 : 20;
 const MAX_WISPS = MOBILE ? 8 : 24;
@@ -132,6 +133,23 @@ THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
     }
     return vec3(0.45, 0.75, 1.0) * (min(g, 1.5) * vfGlow + min(ring, 1.0) * 0.18);
   }
+  uniform float vfTime;
+  float vfHash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+  float vfNoise(vec3 x) {
+    vec3 i = floor(x), f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(vfHash(i), vfHash(i + vec3(1, 0, 0)), f.x), mix(vfHash(i + vec3(0, 1, 0)), vfHash(i + vec3(1, 1, 0)), f.x), f.y),
+               mix(mix(vfHash(i + vec3(0, 0, 1)), vfHash(i + vec3(1, 0, 1)), f.x), mix(vfHash(i + vec3(0, 1, 1)), vfHash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+  }
+  // a snowstorm: clouds of blown snow racing over the mountains, coming and going in gusts
+  float vfStorm(vec3 p, float dt) {
+    vec3 w = vec3(p.x + vfOrigin.x, p.y, vfOrigin.y - p.z);
+    vec3 q = w * vec3(0.012, 0.03, 0.012) + vec3(-vfTime * 0.3, vfTime * 0.04, -vfTime * 0.1);
+    float n = vfNoise(q) * 0.6 + vfNoise(q * 2.4 + 7.1) * 0.4;
+    float gust = 0.5 + 0.5 * sin(vfTime * 0.35 + w.x * 0.0025 + w.z * 0.0017);
+    // marching in long steps the gusts would only be grain: far off, a storm is an even haze
+    return mix(smoothstep(0.35, 0.75, n), 0.3, smoothstep(25.0, 90.0, dt)) * (0.35 + 0.65 * gust);
+  }
   vec3 airFog(vec3 col, vec3 wp) {
     const float TOP_MAX = 700.0, R = 10500.0;
     vec3 ro = cameraPosition;
@@ -146,17 +164,26 @@ THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
     if (rd.y > 1e-4) t1 = min(len, (TOP_MAX - ro.y) / rd.y);
     if (t1 <= t0) return col;
     float dt = (t1 - t0) / float(${AIR_STEPS});
-    float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    // interleaved gradient noise: offsets that vary smoothly across neighbouring pixels read as an even
+    // dither, where white noise would show as grain in dense fog
+    float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     float T = 1.0; vec3 acc = vec3(0.0);
     for (int i = 0; i < ${AIR_STEPS}; i++) {
       vec3 p = ro + rd * (t0 + (float(i) + jitter) * dt);
       vec2 uv = airUV(p);
       vec4 c = textureLod(vfColor, uv, 0.0);
-      float top = textureLod(vfTop, uv, 0.0).r * TOP_MAX;
-      float d = c.a * 0.03 * clamp((top - p.y) / max(8.0, (top - 30.0) * 0.4), 0.0, 1.0);
+      vec3 sh = textureLod(vfTop, uv, 0.0).rgb;    // top, snowstorm, how gradually it thins
+      float h = clamp((sh.r * TOP_MAX - p.y) / max(6.0, sh.b * 300.0), 0.0, 1.0);
+      float d = c.a * 0.03 * h;
+      vec3 fc = c.rgb;
+      if (sh.g > 0.02 && h > 0.0) {
+        float ds = vfStorm(p, dt) * sh.g * h * 0.03;
+        fc = (fc * d + vec3(0.93, 0.95, 1.0) * ds) / max(d + ds, 1e-6);
+        d += ds;
+      }
       if (d > 0.0 && vfWispN > 0) d *= wispClear(p);
       float a = 1.0 - exp(-d * dt);
-      acc += T * a * c.rgb;
+      acc += T * a * fc;
       T *= 1.0 - a;
       if (T < 0.01) break;
     }
@@ -192,7 +219,19 @@ const skyDome = new THREE.Mesh(new THREE.SphereGeometry(5000, 32, 16), new THREE
       gl_FragColor = vec4(sky, 1.0);
       #include <colorspace_fragment>
       // like every other material, the air goes on after the colour space conversion
-      if (vfOn > 0.5) gl_FragColor.rgb = airWall(gl_FragColor.rgb, vFogWorld, airPast(vFogWorld));
+      // look along the line of sight for the nearest unexplored land under the bank's top: that's the wall
+      if (vfOn > 0.5) {
+        vec3 dir = normalize(vFogWorld - cameraPosition), hit = vFogWorld;
+        float past = 0.0;
+        for (int i = 1; i <= ${MOBILE ? 40 : 80}; i++) {
+          vec3 q = cameraPosition + dir * (float(i) * ${MOBILE ? 125 : 62.5});
+          if (q.y > 900.0) break;
+          float k = airPast(q);
+          if (k > past) { past = k; hit = q; }
+          if (past > 0.98) break;
+        }
+        gl_FragColor.rgb = airWall(gl_FragColor.rgb, hit, past);
+      }
     }`,
 }));
 skyDome.frustumCulled = false;
@@ -2396,6 +2435,7 @@ function loop(now) {
   else controls.update();
   updateWorld(now);
   updateWisps(now);
+  AIR.vfTime.value = timeUniform.value;
   weather.update(timeUniform.value, dt, view(), controls.target, orthoSize);
   skyDome.visible = huginn.on && worldActive() && !!AIR.vfMask.value;
   if (skyDome.visible) {
