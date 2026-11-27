@@ -63,7 +63,8 @@ controls.maxZoom = 12;
 // a perspective camera next to the isometric one; WASD to fly, drag to look, slider for field of view
 const raven = new THREE.PerspectiveCamera(70, aspect(), 0.3, 6000);
 raven.rotation.order = 'YXZ';
-const huginn = { on: false, start: new URLSearchParams(location.search).get('huginn') === '1', yaw: 0, pitch: -0.35, keys: new Set(), vel: new THREE.Vector3(), drag: null,
+// you always fly as Huginn: each place starts framed as the old overhead view did, and you take it from there
+const huginn = { on: false, start: true, yaw: 0, pitch: -0.35, keys: new Set(), vel: new THREE.Vector3(), drag: null,
   stick: { x: 0, y: 0 }, gyro: null };   // gyro: { q: phone orientation, off: yaw added by dragging }
 try { raven.fov = +localStorage.getItem('huginnFov') || 70; } catch {}
 const view = () => (huginn.on ? raven : camera);
@@ -1944,12 +1945,13 @@ function aimRaven() {
   raven.rotation.set(huginn.pitch, huginn.yaw, 0);
   raven.updateMatrixWorld();
 }
-// take off from where the isometric view is looking, seeing about as much of the place
+// where you start at a place: looking down at it from the corner, seeing about as much as the old
+// overhead view did
 function perchRaven() {
   const c = controls.target;
   _f.subVectors(c, camera.position).normalize();
   huginn.yaw = Math.atan2(-_f.x, -_f.z);
-  huginn.pitch = -0.45;
+  huginn.pitch = -0.6;
   const hh = orthoSize / camera.zoom;
   const d = THREE.MathUtils.clamp(hh / Math.tan(THREE.MathUtils.degToRad(raven.fov / 2)), 12, 400);
   aimRaven();
@@ -1958,17 +1960,6 @@ function perchRaven() {
   huginn.vel.set(0, 0, 0);
   clampRaven();
   raven.updateMatrixWorld();
-}
-// land: the isometric view centres on the ground the raven was looking at
-function landRaven() {
-  raven.getWorldDirection(_v);
-  let t = 60;
-  if (_v.y < -0.05) t = Math.min(400, Math.max(5, (raven.position.y - region.center.y) / -_v.y));
-  const off = _r.subVectors(camera.position, controls.target);
-  controls.target.copy(raven.position).addScaledVector(_v, t);
-  controls.target.y = Math.max(floorAt(controls.target.x, controls.target.z) - 1.6, region.center.y);
-  camera.position.copy(controls.target).add(off);
-  controls.update();
 }
 const FLY_KEYS = { KeyW: 1, KeyA: 1, KeyS: 1, KeyD: 1, KeyQ: 1, KeyE: 1, Space: 1, ShiftLeft: 1, ShiftRight: 1, ControlLeft: 1,
   ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1 };
@@ -2065,7 +2056,7 @@ function toggleHuginn(force) {
   const on = force ?? !huginn.on;
   if (on === huginn.on || !region) return;
   huginn.on = on;
-  if (on) perchRaven(); else landRaven();
+  if (on) perchRaven();
   wf.shadowAt = null;
   wf.next = 0;
   controls.enabled = !on;
@@ -2076,15 +2067,10 @@ function toggleHuginn(force) {
   ravenMapAt = 0;
   if (on && !hiMap) loadHiMap();   // the minimap zooms in close: use the sharp map
   requestAnimationFrame(layoutGlobe);
-  $('huginn').title = on ? 'Land (Esc)' : 'Huginn: fly as a raven (H)';
-  const u = new URL(location.href);
-  if (on) u.searchParams.set('huginn', '1'); else u.searchParams.delete('huginn');
-  history.replaceState(null, '', u);
   applyLighting();
   redrawShadows();
 }
 function setupHuginn() {
-  $('huginn').onclick = (e) => { e.currentTarget.blur(); toggleHuginn(); };
   const fov = $('fov');
   fov.value = raven.fov;
   $('fovval').textContent = `${Math.round(raven.fov)}°`;
@@ -2097,9 +2083,7 @@ function setupHuginn() {
   const typing = (e) => e.target.closest?.('input[type=text], textarea');
   window.addEventListener('keydown', (e) => {
     if (typing(e) || e.metaKey || e.altKey || document.body.classList.contains('big')) return;
-    if (e.code === 'KeyH' && !e.ctrlKey) { toggleHuginn(); return; }
     if (!huginn.on) return;
-    if (e.code === 'Escape') { toggleHuginn(false); return; }
     if (FLY_KEYS[e.code]) {
       huginn.keys.add(e.code);
       e.preventDefault();
