@@ -148,6 +148,19 @@
   body.big .poi.bed i { width: 22px; height: 22px; font-size: 12px; }
   body.big .poi.bed span { bottom: 24px; }
   .poi.future { display: none; }
+  /* ---- lights out in the wild, and the trails torches make (only on the enlarged map) ---- */
+  #trails { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; display: none; overflow: visible; }
+  body.big #trails { display: block; }
+  #trails line { stroke: rgba(255, 190, 110, .75); stroke-width: 2; stroke-linecap: round; stroke-dasharray: 2 4;
+    vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 2px rgba(255, 170, 80, .9)); }
+  #trails line.wisp { stroke: rgba(200, 235, 255, .85); filter: drop-shadow(0 0 3px rgba(140, 210, 255, .95)); }
+  #trails line.future { display: none; }
+  .lt { position: absolute; transform: translate(-50%, -50%); width: 5px; height: 5px; border-radius: 50%; z-index: 1; display: none;
+    background: #ffd08a; box-shadow: 0 0 4px 2px rgba(255, 160, 60, .8); }
+  body.big .lt { display: block; }
+  .lt.wisp { background: #eaf7ff; box-shadow: 0 0 6px 3px rgba(140, 210, 255, .85); }
+  .lt.fire { width: 6px; height: 6px; background: #ff9a3c; box-shadow: 0 0 5px 2px rgba(255, 110, 30, .8); }
+  body.big .lt.future { display: none; }
 
   /* ---- status bar: game day, bosses, who's online ---- */
   #hud { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 4; display: flex; align-items: center; gap: 12px;

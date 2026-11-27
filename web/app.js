@@ -754,6 +754,7 @@ function gameDay() {
 function updateWorldState() {
   if (!index?.bosses) return;
   const d = viewDay();
+  document.querySelectorAll('.lt, #trails line').forEach((el) => el.classList.toggle('future', +(el.dataset.found || 0) > d));
   document.querySelectorAll('.poi').forEach((el) => {
     el.classList.toggle('future', +(el.dataset.found || 0) > d);
     if (el.dataset.boss != null) {
@@ -1439,6 +1440,33 @@ function buildGlobe() {
     el.innerHTML = boss ? `<i><img src="${boss.icon}" alt=""></i><span></span>` : `<i>\u2696</i><span>${L.name}</span>`;
     placePoi(el, L);
     mk.appendChild(el);
+  }
+  // torches and campfires out in the wild; torches close together are joined into lit trails
+  const lights = index.lights || [];
+  if (lights.length) {
+    const R = index.radius, NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.id = 'trails';
+    svg.setAttribute('viewBox', `${-R} ${-R} ${2 * R} ${2 * R}`);
+    for (const [a, b] of index.trails || []) {
+      const line = document.createElementNS(NS, 'line');
+      const A = lights[a], B = lights[b];
+      line.setAttribute('x1', A.x); line.setAttribute('y1', -A.z);
+      line.setAttribute('x2', B.x); line.setAttribute('y2', -B.z);
+      line.setAttribute('class', A.kind === 'wisp' && B.kind === 'wisp' ? 'wisp' : '');
+      line.dataset.found = Math.max(A.found, B.found);
+      svg.appendChild(line);
+    }
+    mk.before(svg);
+    const TITLE = { wisp: 'Wisp torch', torch: 'Torch', fire: 'Campfire' };
+    for (const L of lights) {
+      const el = document.createElement('div');
+      el.className = `lt ${L.kind}`;
+      el.title = TITLE[L.kind];
+      el.dataset.found = L.found;
+      placePoi(el, L);
+      mk.appendChild(el);
+    }
   }
   for (const v of index.vehicles || []) {
     const el = document.createElement('div');

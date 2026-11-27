@@ -2,7 +2,7 @@
 
 usage: build.py [--models-only] [slug ...]
 """
-import json, os, sys
+import json, math, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import enter_home, run_tool
 import subprocess
@@ -122,9 +122,18 @@ VEHICLES = {'Raft': 'Raft', 'Karve': 'Karve', 'VikingShip': 'Longship', 'VikingS
 # Both are today's state only, so the map shows them on the latest day of the timeline.
 OWNER, DIED = vworld.stable_hash('ownerName'), vworld.stable_hash('timeOfDeath')
 idx['vehicles'], idx['beds'], idx['graves'] = [], [], []
+# lights people put up out in the wild (no workbench needed): wisp torches, torches and campfires.
+# Inside a place they're already in the 3D view; out here a row of torches is a trail worth drawing.
+LIGHTS = {'piece_groundtorch_mist': 'wisp', 'piece_groundtorch_wood': 'torch', 'piece_groundtorch': 'torch',
+          'piece_groundtorch_green': 'torch', 'piece_groundtorch_blue': 'torch', 'piece_walltorch': 'torch',
+          'fire_pit': 'fire', 'fire_pit_iron': 'fire', 'bonfire': 'fire', 'hearth': 'fire'}
+CREATOR = vworld.stable_hash('creator')
+lights = []
 for zd in vworld.read_zdos('data/world'):
     kind, owner = names.get(zd.prefab), zd.strings.get(OWNER)
     x, z = round(zd.pos[0]), round(zd.pos[2])
+    if kind in LIGHTS and CREATOR in zd.longs and not any(math.hypot(x - r['x'], z - r['z']) < r.get('radius', 120) for r in regions):
+        lights.append(dict(kind=LIGHTS[kind], x=x, z=z, found=zone_day(x, z)))
     if kind in VEHICLES and zd.pos[1] < 1000:
         idx['vehicles'].append(dict(kind=VEHICLES[kind], x=x, z=z))
     elif kind in ('bed', 'piece_bed02') and owner:
@@ -137,6 +146,23 @@ for zd in vworld.read_zdos('data/world'):
     elif kind == 'Player_tombstone' and owner:
         died = zd.longs.get(DIED)   # game time in 100 ns ticks
         idx['graves'].append(dict(name=owner, x=x, z=z, day=int(died / 1e7 // 1200) if died else None, found=len(dates) - 1))
+# trails: join torches into a minimum spanning tree, keeping only links short enough to be a lit path
+TRAIL_GAP = 90
+torches = [i for i, L in enumerate(lights) if L['kind'] != 'fire']
+trail, linked = [], {torches[0]} if torches else set()
+best = {i: (math.hypot(lights[i]['x'] - lights[torches[0]]['x'], lights[i]['z'] - lights[torches[0]]['z']), torches[0])
+        for i in torches[1:]}
+while best:   # Prim's algorithm; there are only ever a few hundred torches
+    i = min(best, key=lambda k: best[k][0])
+    d, j = best.pop(i)
+    if d < TRAIL_GAP:
+        trail.append([j, i])
+    for k in best:
+        dk = math.hypot(lights[i]['x'] - lights[k]['x'], lights[i]['z'] - lights[k]['z'])
+        if dk < best[k][0]:
+            best[k] = (dk, i)
+idx['lights'], idx['trails'] = lights, trail
+print(f'lights: {len(lights)} out in the wild, {len(trail)} trail links')
 # players: sessions/deaths from the server log (also refreshed every few minutes by valheimdisplay-players.timer)
 try:
     run_tool('players')
