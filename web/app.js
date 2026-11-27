@@ -113,15 +113,6 @@ THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
   vec3 airWall(vec3 col, vec3 wp, float past) {
     return mix(col, sRGBTransferOETF(textureLod(vfColor, airUV(wp), 0.0)).rgb * vfLight, past);
   }
-  // how much mist is left at p: none close to a wisp torch, all of it past its reach
-  float wispClear(vec3 p) {
-    float k = 1.0;
-    for (int j = 0; j < ${MAX_WISPS}; j++) {
-      if (j >= vfWispN) break;
-      k *= smoothstep(${WISP_R}.0 * 0.6, ${WISP_R}.0, distance(p, vfWisp[j].xyz));
-    }
-    return k;
-  }
   // the torches' light on whatever is near them, and a faint ring on the ground where their reach ends
   vec3 wispGlow(vec3 wp) {
     float g = 0.0, ring = 0.0;
@@ -130,9 +121,9 @@ THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
       vec3 q = wp - vfWisp[j].xyz;
       float dh = length(q.xz), d2 = dot(q, q);
       g += exp(-d2 / 120.0);
-      ring += smoothstep(1.4, 0.0, abs(dh - ${WISP_R}.0)) * smoothstep(10.0, 3.0, abs(q.y));
+      ring += smoothstep(0.9, 0.0, abs(dh - ${WISP_R}.0)) * smoothstep(10.0, 3.0, abs(q.y));
     }
-    return vec3(0.45, 0.75, 1.0) * (min(g, 1.5) * vfGlow + min(ring, 1.0) * 0.18);
+    return vec3(0.45, 0.75, 1.0) * (min(g, 1.5) * vfGlow + min(ring, 1.0) * (0.25 + 0.5 * vfGlow));
   }
   uniform float vfTime;
   float vfHash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
@@ -168,8 +159,23 @@ THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
     // interleaved gradient noise: offsets that vary smoothly across neighbouring pixels read as an even
     // dither, where white noise would show as grain in dense fog
     float jitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-    float T = 1.0; vec3 acc = vec3(0.0);
+    // each wisp torch clears a sphere of the mist: where the ray runs inside one, found exactly rather than
+    // by the samples (they're metres apart), so its edge is sharp. Its surface, where the mist stops,
+    // glows faintly, brightest where the ray grazes it, so the bubble reads as an outline in the mist.
+    vec2 wiv[${MAX_WISPS}]; float wrim[${MAX_WISPS}];
+    for (int j = 0; j < ${MAX_WISPS}; j++) {
+      wiv[j] = vec2(1e9, -1e9); wrim[j] = 0.0;
+      if (j >= vfWispN) continue;
+      vec3 oc = ro - vfWisp[j].xyz;
+      float b = dot(oc, rd), hh = b * b - dot(oc, oc) + ${WISP_R}.0 * ${WISP_R}.0;
+      if (hh <= 0.0) continue;
+      float s = sqrt(hh);
+      wiv[j] = vec2(-b - s, -b + s);
+      wrim[j] = min(${WISP_R}.0 / max(s, 0.5), 8.0);
+    }
+    float T = 1.0; vec3 acc = vec3(0.0), em = vec3(0.0);
     for (int i = 0; i < ${AIR_STEPS}; i++) {
+      float ta = t0 + float(i) * dt, tb = ta + dt;
       vec3 p = ro + rd * (t0 + (float(i) + jitter) * dt);
       vec2 uv = airUV(p);
       vec4 c = textureLod(vfColor, uv, 0.0);
@@ -182,13 +188,24 @@ THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
         fc = (fc * d + vec3(0.93, 0.95, 1.0) * ds) / max(d + ds, 1e-6);
         d += ds;
       }
-      if (d > 0.0 && vfWispN > 0) d *= wispClear(p);
+      if (d > 0.0 && vfWispN > 0) {
+        float inside = 0.0, rim = 0.0;
+        for (int j = 0; j < ${MAX_WISPS}; j++) {
+          if (j >= vfWispN) break;
+          vec2 iv = wiv[j];
+          inside = max(inside, max(0.0, min(tb, iv.y) - max(ta, iv.x)));
+          if (iv.x >= ta && iv.x < tb) rim += wrim[j];
+          if (iv.y >= ta && iv.y < tb) rim += wrim[j];
+        }
+        em += T * vec3(0.55, 0.8, 1.0) * rim * min(d * 60.0, 1.0) * (0.12 + 0.2 * vfGlow);
+        d *= 1.0 - inside / dt;
+      }
       float a = 1.0 - exp(-d * dt);
       acc += T * a * fc;
       T *= 1.0 - a;
       if (T < 0.01) break;
     }
-    return col * T + acc * vfLight;
+    return col * T + acc * vfLight + em;
   }
 #endif`;
 THREE.ShaderChunk.fog_fragment = `#ifdef USE_FOG
