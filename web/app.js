@@ -1634,6 +1634,63 @@ function rebuildWorldWater() {
 }
 // the wisp torches nearest the eye go to the shaders (they clear the mist and glow); only the ones
 // standing on the timeline's day
+// the shared map's pins and the Fuling villages, as markers standing over the world while you fly.
+// Each sits a little above the ground (the world tiles' height there, once loaded); the nearest win
+// when they'd overlap, and they fade out with distance.
+const MARK_FAR = MOBILE ? 900 : 1500;
+let marks = null;
+function buildMarkers() {
+  const box = $('markers');
+  marks = [];
+  const add = (x, z, icon, name, found, cls) => {
+    const el = document.createElement('div');
+    el.className = 'mk3' + (cls ? ' ' + cls : '');
+    const img = document.createElement('img');
+    img.src = icon; img.alt = '';
+    el.appendChild(img);
+    if (name) { const t = document.createElement('span'); t.textContent = name; el.appendChild(t); }
+    el.style.display = 'none';
+    box.appendChild(el);
+    marks.push({ el, x, z, found, y: null, shown: false });
+  };
+  for (const [name, x, z, icon, found] of index.pins || []) add(x, z, `assets/icons/mapicon_${icon}.png`, name, found);
+  for (const [x, z, found] of index.villages || []) add(x, z, 'assets/icons/TrophyGoblin.png', 'Fuling village', found, 'village');
+}
+function updateMarkers() {
+  if (!marks) { if (!index) return; buildMarkers(); }
+  const on = huginn.on && worldActive() && !document.body.classList.contains('big');
+  const w = window.innerWidth, h = window.innerHeight, cam = view(), d = viewDay();
+  const [cx, cz] = region ? region.info.center : [0, 0];
+  const v = new THREE.Vector3(), list = [];
+  for (const m of marks) {
+    let show = false;
+    if (on && m.found <= d) {
+      const sx = m.x - cx, sz = cz - m.z;
+      const dist = Math.hypot(sx - raven.position.x, sz - raven.position.z);
+      if (dist < MARK_FAR) {
+        const g = groundAt(sx, sz);
+        if (g > -1e8) m.y = Math.max(g, region.info.water);
+        v.set(sx, (m.y ?? region.info.water) + 6, sz).project(cam);
+        if (v.z < 1 && Math.abs(v.x) < 1.1 && Math.abs(v.y) < 1.1) { show = true; list.push([dist, m, (v.x * 0.5 + 0.5) * w, (-v.y * 0.5 + 0.5) * h]); }
+      }
+    }
+    if (!show && m.shown) { m.el.style.display = 'none'; m.shown = false; }
+  }
+  list.sort((a, b) => a[0] - b[0]);
+  const placed = [];
+  for (const [dist, m, x, y] of list) {
+    const bw = m.w || 60;
+    if (placed.some((p) => Math.abs(p[0] - x) < (p[2] + bw) / 2 + 2 && Math.abs(p[1] - y) < 34)) {
+      if (m.shown) { m.el.style.display = 'none'; m.shown = false; }
+      continue;
+    }
+    placed.push([x, y, bw]);
+    if (!m.shown) { m.el.style.display = ''; m.shown = true; }
+    m.el.style.left = `${x}px`; m.el.style.top = `${y}px`;
+    m.el.style.opacity = Math.min(1, (MARK_FAR - dist) / (MARK_FAR * 0.3)).toFixed(2);
+    if (!m.w) m.w = m.el.offsetWidth;
+  }
+}
 let wispsAt = 0;
 function updateWisps(now) {
   if (now < wispsAt || !region) return;
@@ -2453,7 +2510,7 @@ function loop(now) {
   renderer.render(scene, view());
   // labels only move when the camera, timeline or globe does
   const key = view().matrixWorld.elements.join() + camera.zoom + raven.fov + regionDay() + document.body.className + innerWidth + innerHeight;
-  if (key !== labelKey) { labelKey = key; updateLabels(); }
+  if (key !== labelKey) { labelKey = key; updateLabels(); updateMarkers(); }
 }
 setFrustum();
 init();

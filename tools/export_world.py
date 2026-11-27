@@ -36,10 +36,10 @@ TILE, STEP = 512, 4.0
 N = int(TILE / STEP) + 1            # neighbouring tiles share their edge row, so there are no seams
 WATER_LEVEL = 30.0
 ZR = 170                            # the zone grid spans -170..170 zones (+-10880 m)
-# natural things big enough to see from the air
+# natural things big enough to see from the air, and the Fuling villages' huts, walls and totems
 WILD = re.compile(r'^(Beech|Birch|Oak|Pinetree|FirTree|SwampTree|YggaShoot|Rock_|rock|Rock|MineRock|cliff_|giant_|'
                   r'mudpile|HugeRoot|Bush|shrub|stubbe|caverock|ice_rock|silvervein|MineRock|AshlandsTree|Ashlands_rock|'
-                  r'Leviathan|lighttree|cloudberry|HeathRockPillar|tarpit)', re.I)
+                  r'Leviathan|lighttree|cloudberry|HeathRockPillar|tarpit|goblin_|goblinking_totemholder)', re.I)
 WILD_SKIP = re.compile(r'_frac|_destruction|Pickable|log|Log|stub$|_broken|spawner|Seeds|Cone', re.I)
 LAYER_OF = {terrain.MEADOWS: 0, terrain.BLACKFOREST: 1, terrain.SWAMP: 2, terrain.PLAINS: 3,
             terrain.MOUNTAIN: 4, terrain.DEEPNORTH: 4, terrain.OCEAN: 5, terrain.MISTLANDS: 1, terrain.ASHLANDS: 6}

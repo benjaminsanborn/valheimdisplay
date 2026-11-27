@@ -1,4 +1,4 @@
-"""Export the boss trophy icons from the game's asset bundles to web/assets/icons/<name>.png.
+"""Export the boss trophy icons and the map's pin icons from the game's asset bundles to web/assets/icons/<name>.png.
 
   export_icons.py <game data dir> <out dir>
 """
@@ -8,7 +8,9 @@ import sys
 import UnityPy
 
 WANT = ['TrophyEikthyr', 'TrophyTheElder', 'TrophyBonemass', 'TrophyDragonQueen', 'TrophyGoblinKing',
-        'TrophySeekerQueen', 'TrophyFader']
+        'TrophySeekerQueen', 'TrophyFader', 'TrophyGoblin',
+        'mapicon_fire', 'mapicon_house', 'mapicon_hammer', 'mapicon_pin', 'mapicon_portal', 'mapicon_bed',
+        'mapicon_boss_colored', 'mapicon_hildir1', 'mapicon_hildir2', 'mapicon_hildir3']
 
 
 def main():

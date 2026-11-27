@@ -131,6 +131,15 @@ LIGHTS = {'piece_groundtorch_mist': 'wisp', 'piece_groundtorch_wood': 'torch', '
           'piece_groundtorch_green': 'torch', 'piece_groundtorch_blue': 'torch', 'piece_walltorch': 'torch',
           'fire_pit': 'fire', 'fire_pit_iron': 'fire', 'bonfire': 'fire', 'hearth': 'fire'}
 CREATOR = vworld.stable_hash('creator')
+# the shared map's pins (from cartography tables), for the 3D world: name, x, z, icon. Who placed them isn't kept.
+MAP_DATA = vworld.stable_hash('data')
+PIN_ICON = {0: 'fire', 1: 'house', 2: 'hammer', 3: 'pin', 4: 'portal', 6: 'bed', 9: 'boss_colored',
+            14: 'hildir1', 15: 'hildir2', 16: 'hildir3'}
+PIN_NAME = {'$hud_pin_hildir1': "Hildir's chest", '$hud_pin_hildir2': "Hildir's chest", '$hud_pin_hildir3': "Hildir's chest",
+            **{f'$enemy_{e}': n for e, n in [('eikthyr', 'Eikthyr'), ('gdking', 'The Elder'), ('bonemass', 'Bonemass'),
+                                              ('dragon', 'Moder'), ('goblinking', 'Yagluth'), ('seekerqueen', 'The Queen'),
+                                              ('fader', 'Fader')]}}
+pins = []
 lights = []
 # every wisp torch, in places too: the viewer clears the mist around each one and draws its reach
 wisps = []
@@ -141,6 +150,17 @@ for zd in vworld.read_zdos('data/world'):
         lights.append(dict(kind=LIGHTS[kind], x=x, z=z, found=zone_day(x, z)))
     if kind == 'piece_groundtorch_mist' and CREATOR in zd.longs:
         wisps.append([round(zd.pos[0], 1), round(zd.pos[1], 1), round(zd.pos[2], 1), zone_day(x, z)])
+    if kind == 'piece_cartographytable' and MAP_DATA in zd.bytearrays:
+        try:
+            for name, (px, py, pz), t in vworld.read_shared_pins(zd.bytearrays[MAP_DATA]):
+                if t not in PIN_ICON:
+                    continue
+                name = PIN_NAME.get(name, name if not name.startswith('$') else '')
+                # every player shares their own copy of a pin: keep one
+                if not any(q[0] == name and q[3] == PIN_ICON[t] and abs(q[1] - px) < 12 and abs(q[2] - pz) < 12 for q in pins):
+                    pins.append([name, round(px), round(pz), PIN_ICON[t], zone_day(px, pz)])
+        except Exception as e:
+            print('pins: could not read a cartography table:', e, file=sys.stderr)
     if kind in VEHICLES and zd.pos[1] < 1000:
         idx['vehicles'].append(dict(kind=VEHICLES[kind], x=x, z=z))
     elif kind in ('bed', 'piece_bed02') and owner:
@@ -170,6 +190,11 @@ while best:   # Prim's algorithm; there are only ever a few hundred torches
             best[k] = (dk, i)
 idx['lights'], idx['trails'], idx['wisps'] = lights, trail, wisps
 print(f'lights: {len(lights)} out in the wild, {len(trail)} trail links, {len(wisps)} wisp torches')
+idx['pins'] = pins
+# Fuling villages, where the world has generated them
+VILLAGE = {vworld.stable_hash('GoblinCamp1'), vworld.stable_hash('GoblinCamp2')}
+idx['villages'] = [[round(x), round(z), zone_day(x, z)] for h, (x, y, z), placed in state['locations'] if placed and h in VILLAGE]
+print(f'map: {len(pins)} shared pins, {len(idx["villages"])} Fuling villages')
 # players: sessions/deaths from the server log (also refreshed every few minutes by valheimdisplay-players.timer)
 try:
     run_tool('players')

@@ -110,6 +110,13 @@
   #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
   .lbl { position: absolute; transform: translate(-50%, -100%); white-space: nowrap; font-size: 11px; padding: 2px 6px;
     background: rgba(20, 18, 15, 0.75); border: 1px solid rgba(224, 166, 74, 0.5); border-radius: 4px; color: var(--ink); }
+  /* the shared map's pins and the Fuling villages, standing over the 3D world as on the game's map */
+  #markers { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .mk3 { position: absolute; display: flex; flex-direction: column; align-items: center; transform: translate(-50%, -100%);
+    color: #fff; font-size: 12px; white-space: nowrap; text-shadow: 0 0 3px #000, 0 1px 2px #000; }
+  .mk3 img { width: 26px; height: 26px; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8)); }
+  .mk3.village { color: #ffd59a; }
+  .mk3.village img { width: 30px; height: 30px; }
   .lbl.portal { border-color: rgba(140, 200, 255, 0.7); }
   .lbl.link { pointer-events: auto; cursor: pointer; }
   .lbl.link::after { content: ' \2192'; color: rgba(140, 200, 255, 0.9); }
@@ -210,6 +217,7 @@
 </head>
 <body>
 <div id="view"></div>
+<div id="markers"></div>
 <div id="labels"></div>
 <div id="backdrop"></div>
 <div id="globe">

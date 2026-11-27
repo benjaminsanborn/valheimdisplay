@@ -243,5 +243,26 @@ def read_world_state(folder: str):
     return state
 
 
+def read_shared_pins(data: bytes):
+    """The pins on a cartography table's shared map (its ZDO's "data"): [(name, (x, y, z), type)].
+    The layout is Minimap.GetSharedMapData's: gzip of version, the explored bitmap, then the pins."""
+    import gzip as _gz
+    r = Reader(_gz.decompress(data))
+    ver = r.int()
+    n = r.int()
+    r.p += n                      # explored, one byte per map pixel
+    pins = []
+    for _ in range(r.int()):
+        r.long()                  # owner
+        name = r.string()
+        pos = r.vec3()
+        kind = r.int()
+        r.bool()                  # checked (crossed out)
+        if ver >= 3:
+            r.string()            # who shared it
+        pins.append((name, pos, kind))
+    return pins
+
+
 def read_generated_zones(folder: str):
     return read_world_state(folder)['zones']
