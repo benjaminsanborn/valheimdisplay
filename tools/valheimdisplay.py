@@ -381,6 +381,13 @@ main{{max-width:720px;width:100%}}pre{{background:#000a;padding:12px;border-radi
     return Handler
 
 
+class Server(ThreadingHTTPServer):
+    # a place loads a few hundred models and textures at once; with the default backlog of 5 the kernel
+    # drops the overflow and browsers retry after 1, 3, 7, 15... seconds, so loading seemed to hang
+    request_queue_size = 1024
+    daemon_threads = True
+
+
 # ---------------------------------------------------------------- main
 def main():
     if len(sys.argv) > 2 and sys.argv[1] == '__tool':   # the executable running one of its tools
@@ -422,7 +429,7 @@ def main():
         return
     if cmd != 'serve':
         sys.exit(__doc__)
-    server = ThreadingHTTPServer((cfg['bind'], cfg['port']), make_handler(os.path.join(cfg['home'], 'web'), updater))
+    server = Server((cfg['bind'], cfg['port']), make_handler(os.path.join(cfg['home'], 'web'), updater))
     host = 'localhost' if cfg['bind'] in ('0.0.0.0', '::', '') else cfg['bind']
     print(f'\nServing http://{host}:{cfg["port"]}/  (Ctrl+C to stop)\n', flush=True)
     threading.Thread(target=updater.loop, daemon=True).start()

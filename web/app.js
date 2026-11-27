@@ -1159,10 +1159,6 @@ function landRaven() {
   camera.position.copy(controls.target).add(off);
   controls.update();
 }
-function ravenAhead() {
-  raven.getWorldDirection(_v);
-  return _f.copy(raven.position).addScaledVector(_v, 15).add(_r.set(0, -25, 0));
-}
 const FLY_KEYS = { KeyW: 1, KeyA: 1, KeyS: 1, KeyD: 1, KeyQ: 1, KeyE: 1, Space: 1, ShiftLeft: 1, ShiftRight: 1, ControlLeft: 1,
   ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1 };
 function flyRaven(dt) {
@@ -1562,13 +1558,9 @@ function loop(now) {
   const dt = Math.min(clock.getDelta(), 0.1);
   timeUniform.value = clock.elapsedTime;
   animateFires(timeUniform.value);
-  if (huginn.on) {
-    flyRaven(dt);
-    weather.update(timeUniform.value, dt, raven, ravenAhead(), orthoSize, window.innerHeight);
-  } else {
-    weather.update(timeUniform.value, dt, camera, controls.target, orthoSize, window.innerHeight);
-    controls.update();
-  }
+  if (huginn.on) flyRaven(dt);
+  else controls.update();
+  weather.update(timeUniform.value, dt, view(), controls.target, orthoSize);
   if (weather.state.p.lightning) applyLighting();
   renderer.render(scene, view());
   // labels only move when the camera, timeline or globe does
