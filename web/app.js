@@ -222,9 +222,9 @@ const skyDome = new THREE.Mesh(new THREE.SphereGeometry(5000, 32, 16), new THREE
       // look along the line of sight for the nearest unexplored land under the bank's top: that's the wall
       if (vfOn > 0.5) {
         vec3 dir = normalize(vFogWorld - cameraPosition), hit = vFogWorld;
-        float past = 0.0;
+        float past = 0.0, j = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
         for (int i = 1; i <= ${MOBILE ? 40 : 80}; i++) {
-          vec3 q = cameraPosition + dir * (float(i) * ${MOBILE ? 125 : 62.5});
+          vec3 q = cameraPosition + dir * ((float(i) - j) * ${MOBILE ? 125 : 62.5});
           if (q.y > 900.0) break;
           float k = airPast(q);
           if (k > past) { past = k; hit = q; }
