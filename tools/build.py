@@ -132,11 +132,15 @@ LIGHTS = {'piece_groundtorch_mist': 'wisp', 'piece_groundtorch_wood': 'torch', '
           'fire_pit': 'fire', 'fire_pit_iron': 'fire', 'bonfire': 'fire', 'hearth': 'fire'}
 CREATOR = vworld.stable_hash('creator')
 lights = []
+# every wisp torch, in places too: the viewer clears the mist around each one and draws its reach
+wisps = []
 for zd in vworld.read_zdos('data/world'):
     kind, owner = names.get(zd.prefab), zd.strings.get(OWNER)
     x, z = round(zd.pos[0]), round(zd.pos[2])
     if kind in LIGHTS and CREATOR in zd.longs and not any(math.hypot(x - r['x'], z - r['z']) < r.get('radius', 120) for r in regions):
         lights.append(dict(kind=LIGHTS[kind], x=x, z=z, found=zone_day(x, z)))
+    if kind == 'piece_groundtorch_mist' and CREATOR in zd.longs:
+        wisps.append([round(zd.pos[0], 1), round(zd.pos[1], 1), round(zd.pos[2], 1), zone_day(x, z)])
     if kind in VEHICLES and zd.pos[1] < 1000:
         idx['vehicles'].append(dict(kind=VEHICLES[kind], x=x, z=z))
     elif kind in ('bed', 'piece_bed02') and owner:
@@ -164,8 +168,8 @@ while best:   # Prim's algorithm; there are only ever a few hundred torches
         dk = math.hypot(lights[i]['x'] - lights[k]['x'], lights[i]['z'] - lights[k]['z'])
         if dk < best[k][0]:
             best[k] = (dk, i)
-idx['lights'], idx['trails'] = lights, trail
-print(f'lights: {len(lights)} out in the wild, {len(trail)} trail links')
+idx['lights'], idx['trails'], idx['wisps'] = lights, trail, wisps
+print(f'lights: {len(lights)} out in the wild, {len(trail)} trail links, {len(wisps)} wisp torches')
 # players: sessions/deaths from the server log (also refreshed every few minutes by valheimdisplay-players.timer)
 try:
     run_tool('players')

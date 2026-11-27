@@ -75,10 +75,17 @@ const view = () => (huginn.on ? raven : camera);
 // three's own fog chunks, before the ordinary distance fog; materials get the data via airFog().
 const AIR = {
   vfOn: { value: 0 }, vfColor: { value: null }, vfTop: { value: null },
+  vfMask: { value: null },   // the edge of the explored world: 1 inside, 0 past it (all fog bank)
   vfOrigin: { value: new THREE.Vector2() },      // the scene origin in world (x, z)
   vfLight: { value: new THREE.Vector3(1, 1, 1) },
+  // wisp torches near the eye (scene x, y, z): each clears the mist around it and glows
+  vfWisp: { value: Array.from({ length: MOBILE ? 8 : 24 }, () => new THREE.Vector4()) },
+  vfWispN: { value: 0 },
+  vfGlow: { value: 0.35 },
 };
 const AIR_STEPS = MOBILE ? 10 : 20;
+const MAX_WISPS = MOBILE ? 8 : 24;
+const WISP_R = 24;   // how far a wisp torch pushes the mist back, in metres (the game's own reach)
 THREE.ShaderChunk.fog_pars_vertex = `#ifdef USE_FOG
   varying float vFogDepth; varying vec3 vFogWorld;
 #endif`;
@@ -95,6 +102,36 @@ THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
     uniform float fogNear; uniform float fogFar;
   #endif
   uniform float vfOn; uniform sampler2D vfColor; uniform sampler2D vfTop; uniform vec2 vfOrigin; uniform vec3 vfLight;
+  uniform vec4 vfWisp[${MAX_WISPS}]; uniform int vfWispN; uniform float vfGlow; uniform sampler2D vfMask;
+  vec2 airUV(vec3 p) { return vec2(p.x + vfOrigin.x + 10500.0, vfOrigin.y - p.z + 10500.0) / 21000.0; }
+  // past the edge of the explored world nothing shows: anything below the top of the fog bank is fog
+  float airPast(vec3 wp) {
+    return (1.0 - smoothstep(0.15, 0.45, textureLod(vfMask, airUV(wp), 0.0).r)) * smoothstep(900.0, 550.0, wp.y);
+  }
+  vec3 airWall(vec3 col, vec3 wp, float past) {
+    return mix(col, sRGBTransferOETF(textureLod(vfColor, airUV(wp), 0.0)).rgb * vfLight, past);
+  }
+  // how much mist is left at p: none close to a wisp torch, all of it past its reach
+  float wispClear(vec3 p) {
+    float k = 1.0;
+    for (int j = 0; j < ${MAX_WISPS}; j++) {
+      if (j >= vfWispN) break;
+      k *= smoothstep(${WISP_R}.0 * 0.6, ${WISP_R}.0, distance(p, vfWisp[j].xyz));
+    }
+    return k;
+  }
+  // the torches' light on whatever is near them, and a faint ring on the ground where their reach ends
+  vec3 wispGlow(vec3 wp) {
+    float g = 0.0, ring = 0.0;
+    for (int j = 0; j < ${MAX_WISPS}; j++) {
+      if (j >= vfWispN) break;
+      vec3 q = wp - vfWisp[j].xyz;
+      float dh = length(q.xz), d2 = dot(q, q);
+      g += exp(-d2 / 120.0);
+      ring += smoothstep(1.4, 0.0, abs(dh - ${WISP_R}.0)) * smoothstep(10.0, 3.0, abs(q.y));
+    }
+    return vec3(0.45, 0.75, 1.0) * (min(g, 1.5) * vfGlow + min(ring, 1.0) * 0.18);
+  }
   vec3 airFog(vec3 col, vec3 wp) {
     const float TOP_MAX = 700.0, R = 10500.0;
     vec3 ro = cameraPosition;
@@ -113,10 +150,11 @@ THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
     float T = 1.0; vec3 acc = vec3(0.0);
     for (int i = 0; i < ${AIR_STEPS}; i++) {
       vec3 p = ro + rd * (t0 + (float(i) + jitter) * dt);
-      vec2 uv = vec2(p.x + vfOrigin.x + R, vfOrigin.y - p.z + R) / (2.0 * R);
+      vec2 uv = airUV(p);
       vec4 c = textureLod(vfColor, uv, 0.0);
       float top = textureLod(vfTop, uv, 0.0).r * TOP_MAX;
       float d = c.a * 0.03 * clamp((top - p.y) / max(8.0, (top - 30.0) * 0.4), 0.0, 1.0);
+      if (d > 0.0 && vfWispN > 0) d *= wispClear(p);
       float a = 1.0 - exp(-d * dt);
       acc += T * a * c.rgb;
       T *= 1.0 - a;
@@ -131,9 +169,35 @@ THREE.ShaderChunk.fog_fragment = `#ifdef USE_FOG
   #else
     float fogFactor = smoothstep( fogNear, fogFar, vFogDepth );
   #endif
-  if (vfOn > 0.5) gl_FragColor.rgb = airFog(gl_FragColor.rgb, vFogWorld);
+  if (vfWispN > 0) gl_FragColor.rgb += wispGlow(vFogWorld);
+  if (vfOn > 0.5) {
+    // the fog bank is the edge of the world, so the view distance's fade doesn't reach it
+    float past = airPast(vFogWorld);
+    gl_FragColor.rgb = airWall(airFog(gl_FragColor.rgb, vFogWorld), vFogWorld, past);
+    fogFactor *= 1.0 - past;
+  }
   gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, fogFactor );
 #endif`;
+// the sky while flying: a dome around the raven, so the fog bank over unexplored land stands against
+// the sky as a wall instead of ending where the land does
+const skyDome = new THREE.Mesh(new THREE.SphereGeometry(5000, 32, 16), new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false, defines: { USE_FOG: '' },
+  uniforms: { ...AIR, sky: { value: new THREE.Color() }, fogColor: { value: new THREE.Color() }, fogNear: { value: 0 }, fogFar: { value: 1 } },
+  vertexShader: `varying float vFogDepth; varying vec3 vFogWorld;
+    void main() { vec4 w = modelMatrix * vec4(position, 1.0); vFogWorld = w.xyz; vec4 mv = viewMatrix * w;
+      vFogDepth = -mv.z; gl_Position = projectionMatrix * mv; }`,
+  fragmentShader: `uniform vec3 sky;
+    #include <fog_pars_fragment>
+    void main() {
+      gl_FragColor = vec4(sky, 1.0);
+      #include <colorspace_fragment>
+      // like every other material, the air goes on after the colour space conversion
+      if (vfOn > 0.5) gl_FragColor.rgb = airWall(gl_FragColor.rgb, vFogWorld, airPast(vFogWorld));
+    }`,
+}));
+skyDome.frustumCulled = false;
+skyDome.renderOrder = -10;
+skyDome.visible = false;
 // give a material the air (shared uniforms, so updates reach every program)
 function airFog(mat) {
   if (mat.userData.air) return mat;
@@ -246,9 +310,15 @@ function terrainMaterial(waterLevel, tile = null) {
       sh.uniforms.holeCount = tile.holeCount;
       sh.vertexShader = sh.vertexShader
         .replace('#include <common>', `#include <common>
-          attribute float explored; varying float vExp; varying vec2 vWorldXZ;`)
+          attribute float explored; varying float vExp; varying vec2 vWorldXZ;
+          uniform float vfOn; uniform sampler2D vfMask; uniform vec2 vfOrigin; uniform float waterLevel;`)
         .replace('#include <begin_vertex>', `#include <begin_vertex>
-          vExp = explored; vWorldXZ = (modelMatrix * vec4(transformed, 1.0)).xz;`);
+          vExp = explored; vWorldXZ = (modelMatrix * vec4(transformed, 1.0)).xz;
+          // past the edge of the explored world the land lies flat, so no mountain shows through the fog
+          if (vfOn > 0.5) {
+            vec2 muv = vec2(vWorldXZ.x + vfOrigin.x + 10500.0, vfOrigin.y - vWorldXZ.y + 10500.0) / 21000.0;
+            transformed.y = mix(waterLevel + 1.0, transformed.y, smoothstep(0.1, 0.4, textureLod(vfMask, muv, 0.0).r));
+          }`);
       sh.fragmentShader = sh.fragmentShader
         .replace('#include <common>', `#include <common>
           ${HOLES_GLSL} varying float vExp; varying vec2 vWorldXZ;`)
@@ -961,7 +1031,7 @@ function gameDay() {
 function updateWorldState() {
   if (!index?.bosses) return;
   const d = viewDay();
-  document.querySelectorAll('.lt, #trails line').forEach((el) => el.classList.toggle('future', +(el.dataset.found || 0) > d));
+  document.querySelectorAll('.lt, #trails line, #trails circle').forEach((el) => el.classList.toggle('future', +(el.dataset.found || 0) > d));
   document.querySelectorAll('.poi').forEach((el) => {
     el.classList.toggle('future', +(el.dataset.found || 0) > d);
     if (el.dataset.boss != null) {
@@ -1147,6 +1217,7 @@ function applyLighting() {
   overcastUniform.value = p.overcast;
   wild.light.value = (night ? 0.3 : 1) * (0.55 + 0.45 * Math.min(1, p.sun));
   if (night) AIR.vfLight.value.set(0.1, 0.12, 0.18); else AIR.vfLight.value.setScalar(0.7 + 0.3 * Math.min(1, p.sun));
+  AIR.vfGlow.value = night ? 0.9 : 0.3;
   windUniform.value = 1 + Math.hypot(p.wind[0], p.wind[1]) / 3;
   if (p.fog) {
     scene.fog.color.copy(weather.state.fogColor).multiplyScalar(night ? 0.13 : 1);
@@ -1364,6 +1435,23 @@ function eyeWorldPos() {
   const [cx, cz] = region.info.center, e = eye();
   return { x: e.x + cx, y: e.y, z: cz - e.z };
 }
+// the explored world's edge, read from explored.png (row 0 = north)
+function readMask(img) {
+  const c = document.createElement('canvas');
+  c.width = img.width; c.height = img.height;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(img, 0, 0);
+  const d = g.getImageData(0, 0, c.width, c.height).data, a = new Uint8Array(c.width * c.height);
+  for (let i = 0; i < a.length; i++) a[i] = d[i * 4];
+  return { a, n: c.width };
+}
+function reachable(x, z) {
+  const m = wf.reach;
+  if (!m) return true;
+  const i = Math.floor((x + 10500) / 21000 * m.n), j = Math.floor((10500 - z) / 21000 * m.n);
+  if (i < 0 || j < 0 || i >= m.n || j >= m.n) return false;
+  return m.a[j * m.n + i] >= 100;
+}
 function ravenWorldPos() {
   const [cx, cz] = region.info.center;
   return { x: raven.position.x + cx, y: raven.position.y, z: cz - raven.position.z };
@@ -1383,8 +1471,10 @@ function ensureWorld() {
     if (!meta) return;
     wf.meta = meta;
     // the air over the world
-    Promise.all(['atmosphere.png', 'atmosphere_top.png'].map((f) => texLoader.loadAsync(`assets/world/${f}`))).then(([c, t]) => {
-      for (const x of [c, t]) { x.generateMipmaps = false; x.minFilter = x.magFilter = THREE.LinearFilter; x.wrapS = x.wrapT = THREE.ClampToEdgeWrapping; }
+    Promise.all(['atmosphere.png', 'atmosphere_top.png', 'explored.png'].map((f) => texLoader.loadAsync(`assets/world/${f}`))).then(([c, t, e]) => {
+      AIR.vfMask.value = e;
+      wf.reach = readMask(e.image);
+      for (const x of [c, t, e]) { x.generateMipmaps = false; x.minFilter = x.magFilter = THREE.LinearFilter; x.wrapS = x.wrapT = THREE.ClampToEdgeWrapping; }
       c.colorSpace = THREE.SRGBColorSpace;
       AIR.vfColor.value = c; AIR.vfTop.value = t; AIR.vfOn.value = 1;
     }).catch(() => {});
@@ -1485,6 +1575,25 @@ function rebuildWorldWater() {
   wf.waterAt = new THREE.Vector2(x, z);
   wf.waterDirty = 0;
 }
+// the wisp torches nearest the eye go to the shaders (they clear the mist and glow); only the ones
+// standing on the timeline's day
+let wispsAt = 0;
+function updateWisps(now) {
+  if (now < wispsAt || !region) return;
+  wispsAt = now + 300;
+  const all = index.wisps || [], d = viewDay(), [cx, cz] = region.info.center, e = eye();
+  const near = [];
+  for (const w of all) {
+    if (w[3] > d) continue;
+    const x = w[0] - cx, z = cz - w[2];
+    near.push([Math.hypot(x - e.x, z - e.z), x, w[1], z]);
+  }
+  near.sort((a, b) => a[0] - b[0]);
+  const n = Math.min(MAX_WISPS, near.length);
+  for (let i = 0; i < n; i++) AIR.vfWisp.value[i].set(near[i][1], near[i][2] + 1.5, near[i][3], 0);
+  AIR.vfWispN.value = n;
+}
+
 function updateWorld(now) {
   if (!worldActive() || now < wf.next) return;
   wf.next = now + 250;
@@ -1519,7 +1628,7 @@ function updateWorld(now) {
     wf.shadowAt = look.clone();
     wf.shadowSize = size;
   }
-  for (const { sp } of wf.lights) sp.material.visible = night;   // like the fires in a place: lit at night
+  for (const { L, sp } of wf.lights) sp.material.visible = night || L.kind === 'wisp';   // like the fires in a place: lit at night
   // a place comes in at full detail once you're over it (k < 1: inside its radius). The current one
   // stays unless you've left it or are clearly nearer the middle of another, so edges don't flicker.
   let best = null, curK = Infinity;
@@ -1773,8 +1882,16 @@ function clampRaven() {
   const p = raven.position, T = region.T, m = 40;
   if (worldActive()) {
     // anywhere in the world, up to the edge
-    const w = ravenWorldPos(), r = Math.hypot(w.x, w.z), R = 10400;
-    if (r > R) setRavenWorldPos({ x: w.x * R / r, y: w.y, z: w.z * R / r });
+    let w = ravenWorldPos();
+    const r = Math.hypot(w.x, w.z), R = 10400;
+    if (r > R) { w = { x: w.x * R / r, y: w.y, z: w.z * R / r }; setRavenWorldPos(w); }
+    // the edge of the explored world: slide along it, never through
+    const ok = huginn.ok;
+    if (ok && !reachable(w.x, w.z) && Math.hypot(w.x - ok.x, w.z - ok.z) < 200) {
+      const to = reachable(w.x, ok.z) ? { x: w.x, z: ok.z } : reachable(ok.x, w.z) ? { x: ok.x, z: w.z } : ok;
+      setRavenWorldPos({ x: to.x, y: w.y, z: to.z });
+      huginn.vel.x = huginn.vel.z = 0;
+    } else if (reachable(w.x, w.z)) huginn.ok = { x: w.x, z: w.z };
     p.y = THREE.MathUtils.clamp(p.y, floorAt(p.x, p.z), 1500);
     return;
   }
@@ -2146,11 +2263,21 @@ function buildGlobe() {
   }
   // torches and campfires out in the wild; torches close together are joined into lit trails
   const lights = index.lights || [];
-  if (lights.length) {
+  if (lights.length || index.wisps?.length) {
     const R = index.radius, NS = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(NS, 'svg');
     svg.id = 'trails';
     svg.setAttribute('viewBox', `${-R} ${-R} ${2 * R} ${2 * R}`);
+    // how far each wisp torch pushes the mist back, to scale
+    svg.innerHTML = `<defs><radialGradient id="wispreach"><stop offset="0" stop-color="rgb(170,220,255)" stop-opacity=".55"/>
+      <stop offset=".6" stop-color="rgb(140,205,255)" stop-opacity=".22"/><stop offset="1" stop-color="rgb(140,205,255)" stop-opacity=".08"/></radialGradient></defs>`;
+    for (const w of index.wisps || []) {
+      const c = document.createElementNS(NS, 'circle');
+      c.setAttribute('cx', w[0]); c.setAttribute('cy', -w[2]); c.setAttribute('r', WISP_R);
+      c.setAttribute('class', 'reach');
+      c.dataset.found = w[3];
+      svg.appendChild(c);
+    }
     for (const [a, b] of index.trails || []) {
       const line = document.createElementNS(NS, 'line');
       const A = lights[a], B = lights[b];
@@ -2268,7 +2395,14 @@ function loop(now) {
   if (huginn.on) { flyRaven(dt); updateRavenMarker(now); }
   else controls.update();
   updateWorld(now);
+  updateWisps(now);
   weather.update(timeUniform.value, dt, view(), controls.target, orthoSize);
+  skyDome.visible = huginn.on && worldActive() && !!AIR.vfMask.value;
+  if (skyDome.visible) {
+    if (!skyDome.parent) scene.add(skyDome);
+    skyDome.position.copy(raven.position);
+    skyDome.material.uniforms.sky.value.copy(scene.background);
+  }
   if (huginn.on && worldActive()) {
     const f = scene.fog, far = VIEW * 0.95;
     if (f.far > far) { f.far = far; f.near = Math.min(f.near, far * 0.4); }

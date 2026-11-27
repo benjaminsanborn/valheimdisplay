@@ -18,7 +18,8 @@ The model names are added to needed_models.txt so the build exports them.
 The atmosphere over the whole world, for the viewer's volumetric fog: <out>/world/atmosphere.png (RGB fog
 colour, A density) and atmosphere_top.png (how high the fog reaches, 0..700 m). Each biome has its own
 air (mist filling the Mistlands valleys, haze over swamps...), unexplored land a tall dense bank, and
-everything is blurred so you pass gradually from one into the next.
+everything is blurred so you pass gradually from one into the next. explored.png is the edge of the
+explored world (1 inside, 0 past it), where the viewer walls the world off.
 """
 import hashlib, json, math, os, re, struct, sys
 
@@ -79,6 +80,16 @@ UNEXPLORED = ((0.64, 0.67, 0.73), 1.0, 650.0)
 TOP_MAX = 700.0
 
 
+def reach_of(explored_zones):
+    """How far the explored world reaches, per zone: 1 on explored land and a zone or two past it, falling
+    to 0 beyond. The edge of the world you can fly in: past it there's only the unexplored fog bank."""
+    return gaussian_filter(maximum_filter(explored_zones, size=5), 1.0)
+
+
+def reach_at(reach, x, z):
+    return np.clip(map_coordinates(reach, [np.asarray(z) / 64.0 + ZR, np.asarray(x) / 64.0 + ZR], order=1, mode='constant') * 1.4, 0, 1)
+
+
 def atmosphere(wg, explored_zones, folder, N=1024, R=10500.0):
     c = (np.arange(N) + 0.5) / N * 2 * R - R
     X, Z = np.meshgrid(c, -c)                     # row 0 = north, like the world map
@@ -96,8 +107,9 @@ def atmosphere(wg, explored_zones, folder, N=1024, R=10500.0):
     top = gaussian_filter(top * dens, sig) / wd
     dens = wd
     # the unexplored bank starts a zone or two beyond the explored land, rather than bleeding into it
-    reach = gaussian_filter(maximum_filter(explored_zones, size=5), 1.0)
-    exp = np.clip(map_coordinates(reach, [Z / 64.0 + ZR, X / 64.0 + ZR], order=1, mode='constant') * 1.4, 0, 1)
+    exp = reach_at(reach_of(explored_zones), X, Z)
+    # the same edge on its own, for the viewer to wall off what's past it
+    Image.fromarray((exp * 255).astype(np.uint8), 'L').save(os.path.join(folder, 'explored.png'), optimize=True)
     uc, ud, ut = UNEXPLORED
     col = col * exp[..., None] + np.array(uc) * (1 - exp[..., None])
     dens = dens * exp + ud * (1 - exp)
@@ -187,6 +199,11 @@ def main():
     old_sig = {tuple(t[:2]): t[2] for t in old.get('tiles', [])} if old.get('seed') == meta.seed_name else {}
 
     wild, wild_models = wild_objects(world, out)
+    # trees and rocks past the edge of the explored world would stick up out of the fog bank
+    reach = reach_of(grid)
+    for key, items in list(wild.items()):
+        keep = reach_at(reach, [it[1] for it in items], [-it[3] for it in items]) >= 0.3
+        wild[key] = [it for it, k in zip(items, keep) if k]
     atmosphere(terrain.WorldGen(meta.seed, meta.worldgen_version, rivers=False), grid, folder)
     wg = None
     made = 0

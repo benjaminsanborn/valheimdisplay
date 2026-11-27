@@ -160,7 +160,8 @@
   #trails line { stroke: rgba(255, 190, 110, .75); stroke-width: 2; stroke-linecap: round; stroke-dasharray: 2 4;
     vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 2px rgba(255, 170, 80, .9)); }
   #trails line.wisp { stroke: rgba(200, 235, 255, .85); filter: drop-shadow(0 0 3px rgba(140, 210, 255, .95)); }
-  #trails line.future { display: none; }
+  #trails line.future, #trails circle.future { display: none; }
+  #trails circle.reach { fill: url(#wispreach); stroke: rgba(190, 230, 255, .7); stroke-width: 1; vector-effect: non-scaling-stroke; }
   .lt { position: absolute; transform: translate(-50%, -50%); width: 5px; height: 5px; border-radius: 50%; z-index: 1; display: none;
     background: #ffd08a; box-shadow: 0 0 4px 2px rgba(255, 160, 60, .8); }
   body.big .lt { display: block; }
