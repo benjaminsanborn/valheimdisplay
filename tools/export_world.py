@@ -130,7 +130,11 @@ def main():
     explored = np.clip(gaussian_filter(grid, 0.8) * 1.6, 0, 1)
 
     # tile (tx, tz) holds zones tx*8 .. tx*8+7; its grid starts at the south-west corner of the first zone
-    tiles = sorted({(zx // 8, zz // 8) for zx, zz in zones})
+    # plus a ring of tiles around them (greyed as unexplored), so coasts and the seabed carry on past
+    # what's been explored instead of stopping at a tile's edge
+    core = {(zx // 8, zz // 8) for zx, zz in zones}
+    tiles = sorted({(tx + dx, tz + dz) for tx, tz in core for dx in (-1, 0, 1) for dz in (-1, 0, 1)
+                    if math.hypot((tx + dx + 0.5) * TILE, (tz + dz + 0.5) * TILE) < 10500 + TILE})
     folder = os.path.join(out, 'world')
     os.makedirs(folder, exist_ok=True)
     manifest_path = os.path.join(folder, 'tiles.json')
