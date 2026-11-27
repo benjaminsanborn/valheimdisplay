@@ -68,6 +68,82 @@ const huginn = { on: false, start: new URLSearchParams(location.search).get('hug
 try { raven.fov = +localStorage.getItem('huginnFov') || 70; } catch {}
 const view = () => (huginn.on ? raven : camera);
 
+// ---------------------------------------------------------------- the air: volumetric fog
+// Every surface's shader marches its line of sight through the world's air (tools/export_world.py
+// bakes it: per-biome mist and haze, a tall dense bank over unexplored land, blended across borders),
+// so fog fills valleys, peaks poke out of it, and flying into a fog bank swallows you. It runs inside
+// three's own fog chunks, before the ordinary distance fog; materials get the data via airFog().
+const AIR = {
+  vfOn: { value: 0 }, vfColor: { value: null }, vfTop: { value: null },
+  vfOrigin: { value: new THREE.Vector2() },      // the scene origin in world (x, z)
+  vfLight: { value: new THREE.Vector3(1, 1, 1) },
+};
+const AIR_STEPS = MOBILE ? 10 : 20;
+THREE.ShaderChunk.fog_pars_vertex = `#ifdef USE_FOG
+  varying float vFogDepth; varying vec3 vFogWorld;
+#endif`;
+THREE.ShaderChunk.fog_vertex = `#ifdef USE_FOG
+  vFogDepth = - mvPosition.z;
+  vFogWorld = (inverse(viewMatrix) * vec4(mvPosition.xyz, 1.0)).xyz;
+#endif`;
+THREE.ShaderChunk.fog_pars_fragment = `#ifdef USE_FOG
+  uniform vec3 fogColor;
+  varying float vFogDepth; varying vec3 vFogWorld;
+  #ifdef FOG_EXP2
+    uniform float fogDensity;
+  #else
+    uniform float fogNear; uniform float fogFar;
+  #endif
+  uniform float vfOn; uniform sampler2D vfColor; uniform sampler2D vfTop; uniform vec2 vfOrigin; uniform vec3 vfLight;
+  vec3 airFog(vec3 col, vec3 wp) {
+    const float TOP_MAX = 700.0, R = 10500.0;
+    vec3 ro = cameraPosition;
+    // overhead (orthographic): every line of sight runs along the view direction
+    if (isOrthographic) ro = wp + vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]) * 1500.0;
+    vec3 rd = wp - ro;
+    float len = length(rd);
+    rd /= max(len, 1e-4);
+    // only the stretch of the ray below the highest fog
+    float t0 = 0.0, t1 = len;
+    if (ro.y > TOP_MAX) { if (rd.y > -1e-4) return col; t0 = (ro.y - TOP_MAX) / -rd.y; }
+    if (rd.y > 1e-4) t1 = min(len, (TOP_MAX - ro.y) / rd.y);
+    if (t1 <= t0) return col;
+    float dt = (t1 - t0) / float(${AIR_STEPS});
+    float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    float T = 1.0; vec3 acc = vec3(0.0);
+    for (int i = 0; i < ${AIR_STEPS}; i++) {
+      vec3 p = ro + rd * (t0 + (float(i) + jitter) * dt);
+      vec2 uv = vec2(p.x + vfOrigin.x + R, vfOrigin.y - p.z + R) / (2.0 * R);
+      vec4 c = textureLod(vfColor, uv, 0.0);
+      float top = textureLod(vfTop, uv, 0.0).r * TOP_MAX;
+      float d = c.a * 0.03 * clamp((top - p.y) / max(8.0, (top - 30.0) * 0.4), 0.0, 1.0);
+      float a = 1.0 - exp(-d * dt);
+      acc += T * a * c.rgb;
+      T *= 1.0 - a;
+      if (T < 0.01) break;
+    }
+    return col * T + acc * vfLight;
+  }
+#endif`;
+THREE.ShaderChunk.fog_fragment = `#ifdef USE_FOG
+  #ifdef FOG_EXP2
+    float fogFactor = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth );
+  #else
+    float fogFactor = smoothstep( fogNear, fogFar, vFogDepth );
+  #endif
+  if (vfOn > 0.5) gl_FragColor.rgb = airFog(gl_FragColor.rgb, vFogWorld);
+  gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, fogFactor );
+#endif`;
+// give a material the air (shared uniforms, so updates reach every program)
+function airFog(mat) {
+  if (mat.userData.air) return mat;
+  mat.userData.air = true;
+  if (mat.isShaderMaterial) { Object.assign(mat.uniforms, AIR); return mat; }
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = function (sh, r) { prev?.call(this, sh, r); Object.assign(sh.uniforms, AIR); };
+  return mat;
+}
+
 const clock = new THREE.Clock();
 let dayIdx = null;        // timelapse: index into index.dates (null = latest)
 let night = new URLSearchParams(location.search).get('night') === '1';
@@ -134,6 +210,7 @@ function loadModel(name) {
           if (m.map) m.map.anisotropy = 4;
           if (m.alphaTest > 0) { m.side = THREE.DoubleSide; m.alphaTest = 0.45; }
           m.roughness = 0.95; m.metalness = 0;
+          airFog(m);
           parts.push({ geometry: o.geometry, material: m });
         });
         resolve(parts);
@@ -212,7 +289,7 @@ function terrainMaterial(waterLevel, tile = null) {
         float under = smoothstep(0.0, 4.0, waterLevel - vY);
         diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.35, 0.5, 0.55), under);`);
   };
-  return mat;
+  return airFog(mat);   // after its own shader hook, which airFog wraps
 }
 
 function buildTerrain(info, buf, tile = null) {
@@ -380,6 +457,7 @@ function buildWater(info, T, step = 2, holes = newHoles()) {
         #include <fog_fragment>
       }`,
   });
+  airFog(mat);
   const water = new THREE.Mesh(g, mat);
   water.renderOrder = 2;
   return water;
@@ -496,6 +574,7 @@ function buildGrass(info, T) {
         transformed.x += sway * 0.09 * wind * uv.y;
         transformed.z += sway * 0.05 * wind * uv.y;`);
   };
+  airFog(mat);
   const mesh = new THREE.InstancedMesh(grassGeometry(), mat, Math.max(1, items.length));
   const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
   items.forEach((it, n) => {
@@ -705,7 +784,7 @@ function showPlaces() {
 // fly: arriving on the wing: the raven keeps its place in the world while the scene re-centres
 function activatePlace(P, { arrive = null, fly = false } = {}) {
   const prev = region;
-  const keep = fly && prev && huginn.on ? ravenWorldPos() : null;
+  const keep = fly && prev ? (huginn.on ? ravenWorldPos() : 'overhead') : null;
   // how far everything in the scene moves when the origin goes from the old place to the new one
   const shift = prev ? new THREE.Vector3(prev.info.center[0] - P.info.center[0], 0, P.info.center[1] - prev.info.center[1]) : null;
   region = P;
@@ -714,8 +793,8 @@ function activatePlace(P, { arrive = null, fly = false } = {}) {
   P.focus = arrive ? new THREE.Vector3(arrive.pos[0], arrive.pos[1], arrive.pos[2]) : P.home;
   weather.setRegion(P.T, P.info.water);
   if (keep) {
-    setRavenWorldPos(keep);
-    resetView(undefined, true);
+    if (huginn.on) { setRavenWorldPos(keep); resetView(undefined, true); }
+    else { camera.position.add(shift); controls.target.add(shift); controls.update(); orthoSize = Math.max(25, P.buildRadius * 0.9); setFrustum(); }
     shiftWorld(shift);
   } else {
     placeSun();
@@ -727,7 +806,7 @@ function activatePlace(P, { arrive = null, fly = false } = {}) {
   applyNight();
   // every loaded place already shows the timeline's day; only the first place needs it applied
   if (prev) { redrawShadows(); refreshWeather(); updateTimelineUI(); } else applyDay();
-  if (!worldActive()) for (const Q of [...places.values()]) if (Q !== P) unloadPlace(Q);
+  ensureWorld();
   if (huginn.start) { huginn.start = false; toggleHuginn(true); }
 }
 async function loadRegion(slug, arrive, fly = false) {
@@ -1067,6 +1146,7 @@ function applyLighting() {
   sun.intensity = (night ? 0.45 : 2.6) * p.sun;
   overcastUniform.value = p.overcast;
   wild.light.value = (night ? 0.3 : 1) * (0.55 + 0.45 * Math.min(1, p.sun));
+  if (night) AIR.vfLight.value.set(0.1, 0.12, 0.18); else AIR.vfLight.value.setScalar(0.7 + 0.3 * Math.min(1, p.sun));
   windUniform.value = 1 + Math.hypot(p.wind[0], p.wind[1]) / 3;
   if (p.fog) {
     scene.fog.color.copy(weather.state.fogColor).multiplyScalar(night ? 0.13 : 1);
@@ -1277,7 +1357,13 @@ const wf = { meta: null, loading: null, group: new THREE.Group(), tiles: new Map
   ...newHoles() };
 wf.group.visible = false;
 scene.add(wf.group);
-const worldActive = () => huginn.on && !!wf.meta && !!region;
+const worldActive = () => !!wf.meta && !!region;
+// what the world streams around: the raven while flying, else where the overhead view looks
+const eye = () => (huginn.on ? raven.position : controls.target);
+function eyeWorldPos() {
+  const [cx, cz] = region.info.center, e = eye();
+  return { x: e.x + cx, y: e.y, z: cz - e.z };
+}
 function ravenWorldPos() {
   const [cx, cz] = region.info.center;
   return { x: raven.position.x + cx, y: raven.position.y, z: cz - raven.position.z };
@@ -1296,6 +1382,12 @@ function ensureWorld() {
   wf.loading ||= fetch('assets/world/tiles.json').then((r) => (r.ok ? r.json() : null)).catch(() => null).then((meta) => {
     if (!meta) return;
     wf.meta = meta;
+    // the air over the world
+    Promise.all(['atmosphere.png', 'atmosphere_top.png'].map((f) => texLoader.loadAsync(`assets/world/${f}`))).then(([c, t]) => {
+      for (const x of [c, t]) { x.generateMipmaps = false; x.minFilter = x.magFilter = THREE.LinearFilter; x.wrapS = x.wrapT = THREE.ClampToEdgeWrapping; }
+      c.colorSpace = THREE.SRGBColorSpace;
+      AIR.vfColor.value = c; AIR.vfTop.value = t; AIR.vfOn.value = 1;
+    }).catch(() => {});
     wf.material = terrainMaterial(meta.water, wf);
     // the torches and campfires out in the wild glow where they stand
     const glow = (c) => new THREE.SpriteMaterial({ map: glowTexture(), color: c, transparent: true, depthWrite: false,
@@ -1320,6 +1412,7 @@ function recentreWorld() {
   const on = worldActive();
   const [cx, cz] = region.info.center;
   wf.group.position.set(-cx, 0, cz);
+  AIR.vfOrigin.value.set(cx, cz);
   wf.group.visible = on;
   if (wf.water) wf.water.visible = on;
   showPlaces();
@@ -1384,7 +1477,7 @@ function unloadTile(key) {
 }
 // the sea: one big sheet centred under the raven, rebuilt as it travels or as land loads in
 function rebuildWorldWater() {
-  const x = raven.position.x, z = raven.position.z, S = VIEW * 2.2;
+  const x = eye().x, z = eye().z, S = VIEW * 2.2;
   if (wf.water) { scene.remove(wf.water); wf.water.geometry.dispose(); wf.water.material.dispose(); }
   const T = { W: S, D: S, cx: Math.round(x / 16) * 16, cz: Math.round(z / 16) * 16, sample: (px, pz) => groundAt(px, pz) };
   wf.water = buildWater({ water: wf.meta.water }, T, 16, wf);
@@ -1395,7 +1488,7 @@ function rebuildWorldWater() {
 function updateWorld(now) {
   if (!worldActive() || now < wf.next) return;
   wf.next = now + 250;
-  const p = ravenWorldPos(), m = wf.meta, half = m.tile / 2;
+  const p = eyeWorldPos(), m = wf.meta, half = m.tile / 2, e = eye();
   // tiles in reach, nearest first; far ones go
   const want = [];
   for (const t of m.tiles) {
@@ -1407,16 +1500,24 @@ function updateWorld(now) {
   want.sort((a, b) => a[0] - b[0]);
   for (const [, t] of want.slice(0, Math.max(0, 4 - wf.inflight))) loadTile(t);
   updateNearWild();
-  // the sea follows the raven
-  const moved = wf.waterAt ? Math.hypot(raven.position.x - wf.waterAt.x, raven.position.z - wf.waterAt.y) : Infinity;
+  // the sea follows the eye
+  const moved = wf.waterAt ? Math.hypot(e.x - wf.waterAt.x, e.z - wf.waterAt.y) : Infinity;
   if (moved > VIEW * 0.35 || (wf.waterDirty && now - wf.waterDirty > 1500)) rebuildWorldWater();
-  // shadows: a 600 m square around where the raven is looking
-  raven.getWorldDirection(_v);
-  const look = _f.copy(raven.position).addScaledVector(_v.setY(0).normalize(), 120);
+  // shadows: a square around where the raven is looking, or what the overhead view shows
+  let look, size;
+  if (huginn.on) {
+    raven.getWorldDirection(_v);
+    look = _f.copy(raven.position).addScaledVector(_v.setY(0).normalize(), 120);
+    size = 420;
+  } else {
+    look = _f.copy(controls.target);
+    size = Math.max(300, (orthoSize / camera.zoom) * 2.4);
+  }
   look.y = Math.max(groundAt(look.x, look.z), m.water);
-  if (!wf.shadowAt || wf.shadowAt.distanceTo(look) > 60) {
-    placeSun(look, 420);
+  if (!wf.shadowAt || wf.shadowAt.distanceTo(look) > size * 0.15 || wf.shadowSize !== size) {
+    placeSun(look, size);
     wf.shadowAt = look.clone();
+    wf.shadowSize = size;
   }
   for (const { sp } of wf.lights) sp.material.visible = night;   // like the fires in a place: lit at night
   // a place comes in at full detail once you're over it (k < 1: inside its radius). The current one
@@ -1466,7 +1567,7 @@ function wildMaterial() {
   wild.mat = new THREE.ShaderMaterial({
     fog: true,
     uniforms: { ...THREE.UniformsUtils.clone(THREE.UniformsLib.fog), map: { value: wild.rt.texture }, uLight: wild.light,
-      uNearAt: { value: new THREE.Vector3(1e9, 0, 1e9) }, uNear: { value: NEAR },
+      uNearAt: { value: new THREE.Vector3(1e9, 0, 1e9) }, uNear: { value: NEAR }, ...AIR,
       uRect: { value: Array.from({ length: CELLS }, () => new THREE.Vector4()) },
       uBox: { value: Array.from({ length: CELLS }, () => new THREE.Vector4()) } },
     vertexShader: `
@@ -1595,7 +1696,7 @@ function unloadWild(entry) {
 }
 // the real models within NEAR of the raven
 function updateNearWild() {
-  const at = new THREE.Vector3().copy(raven.position).sub(wf.group.position);
+  const at = new THREE.Vector3().copy(eye()).sub(wf.group.position);
   if (!wild.dirty && wild.at && Math.hypot(at.x - wild.at.x, at.z - wild.at.z) < 40) return;
   wild.dirty = false;
   wild.at = at;
@@ -1807,17 +1908,9 @@ function toggleHuginn(force) {
   const on = force ?? !huginn.on;
   if (on === huginn.on || !region) return;
   huginn.on = on;
-  if (on) perchRaven();
-  else {
-    // landing out in the wild: back to the place's usual view
-    const T = region.T, out = Math.abs(raven.position.x - T.cx) > T.W / 2 + 50 || Math.abs(raven.position.z - T.cz) > T.D / 2 + 50;
-    if (out) resetView(); else landRaven();
-  }
-  if (on) ensureWorld().then(recentreWorld);
-  else {
-    for (const P of [...places.values()]) if (P !== region) unloadPlace(P);
-    recentreWorld();
-  }
+  if (on) perchRaven(); else landRaven();
+  wf.shadowAt = null;
+  wf.next = 0;
   controls.enabled = !on;
   huginn.keys.clear();
   huginn.stick.x = huginn.stick.y = 0;
@@ -1890,7 +1983,7 @@ function setupHuginn() {
 
 // ---------------------------------------------------------------- portal travel
 function travel(target) {
-  if (worldActive()) { jumpThrough(target); return; }
+  if (huginn.on && worldActive()) { jumpThrough(target); return; }
   const fx = $('flash');
   fx.classList.add('on');
   setTimeout(() => {
@@ -2171,10 +2264,11 @@ function loop(now) {
   const dt = Math.min(clock.getDelta(), 0.1);
   timeUniform.value = clock.elapsedTime;
   animateFires(timeUniform.value);
-  if (huginn.on) { flyRaven(dt); updateWorld(now); updateRavenMarker(now); }
+  if (huginn.on) { flyRaven(dt); updateRavenMarker(now); }
   else controls.update();
+  updateWorld(now);
   weather.update(timeUniform.value, dt, view(), controls.target, orthoSize);
-  if (worldActive()) {
+  if (huginn.on && worldActive()) {
     const f = scene.fog, far = VIEW * 0.95;
     if (f.far > far) { f.far = far; f.near = Math.min(f.near, far * 0.4); }
     if (!weather.state.p.fog) f.color.copy(scene.background);
